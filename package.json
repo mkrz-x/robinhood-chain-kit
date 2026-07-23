@@ -1,0 +1,14 @@
+{
+  "name": "robinhood-chain-kit",
+  "version": "0.1.0",
+  "description": "Chain constants, L1 bridge contracts, US market-hours and retry helpers for building on Robinhood Chain (Arbitrum Orbit L2, chain id 4663). By rhxbt.com.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": { "build": "tsc -p tsconfig.json" },
+  "devDependencies": { "typescript": "^5.5.0" },
+  "repository": { "type": "git", "url": "https://github.com/mkrz-x/robinhood-chain-kit" },
+  "keywords": ["robinhood-chain", "arbitrum-orbit", "4663", "tokenized-stocks", "evm"]
+}
