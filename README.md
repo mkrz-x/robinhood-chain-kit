@@ -5,6 +5,7 @@
 <h1 align="center">robinhood-chain-kit</h1>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/robinhood-chain-kit"><img src="https://img.shields.io/npm/v/robinhood-chain-kit?color=cb3837&label=npm" alt="npm" /></a>
   <a href="https://github.com/mkrz-x/robinhood-chain-kit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/chain%20id-4663-8b5cf6" alt="chain id 4663" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6" alt="TypeScript" />
@@ -48,6 +49,12 @@ flowchart LR
   OB -- "WithdrawalFinalized\n(capital out)" --> APP
   RPC -- "robinhoodChain\n(viem-ready)" --> APP
   DEX -- "isUsEquityMarketOpen()\ngates oracle-gap logic" --> APP
+```
+
+## Install
+
+```
+npm i robinhood-chain-kit
 ```
 
 ## Usage
