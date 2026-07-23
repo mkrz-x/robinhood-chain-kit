@@ -139,3 +139,7 @@ cd examples && npm i && npx tsx scan-pools.mts
 <p align="center">
   built and maintained by <a href="https://x.com/mkrz_">@mkrz_</a> · live terminal: <a href="https://rhxbt.com">rhxbt.com</a> · agent: <a href="https://x.com/0xrhXBT">@0xrhXBT</a>
 </p>
+
+## Credits
+
+Built by [@mkrz-x](https://github.com/mkrz-x) ([rhxbt.com](https://rhxbt.com)) with review help from [@aididhaiqal](https://github.com/aididhaiqal).
