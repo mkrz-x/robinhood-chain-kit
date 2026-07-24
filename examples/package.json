@@ -1,0 +1,13 @@
+{
+  "name": "robinhood-chain-kit-examples",
+  "private": true,
+  "type": "module",
+  "description": "Runnable examples for robinhood-chain-kit. npm i && npx tsx <example>.mts",
+  "dependencies": {
+    "robinhood-chain-kit": "^0.2.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

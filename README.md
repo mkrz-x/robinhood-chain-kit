@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/robinhood-chain-kit"><img src="https://img.shields.io/npm/v/robinhood-chain-kit?color=cb3837&label=npm" alt="npm" /></a>
+  <a href="https://github.com/mkrz-x/robinhood-chain-kit/actions/workflows/ci.yml"><img src="https://github.com/mkrz-x/robinhood-chain-kit/actions/workflows/ci.yml/badge.svg" alt="ci" /></a>
   <a href="https://github.com/mkrz-x/robinhood-chain-kit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/chain%20id-4663-8b5cf6" alt="chain id 4663" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6" alt="TypeScript" />
@@ -29,6 +30,8 @@ Every project on this chain re-derives the same primitives: the chain constants,
 |---|---|
 | `chain` | chain id, RPC, **sequencer feed WS**, explorer, a viem-compatible chain object |
 | `bridge` | every canonical L1 contract (bridge, inbox, outbox, rollup, 3 gateways) + `DepositInitiated` / `WithdrawalFinalized` event signatures |
+| `dex` | the V2/V3 `PairCreated` / `PoolCreated` / `Swap` event signatures observed live on the chain, plus who the swapper actually is on each |
+| `getLogsPaged(getLogs, from, to, opts)` | adaptive log backfill over a capped RPC: halves the span on dense windows, cools off (never halves) on 429, re-grows only after consecutive clean passes |
 | `isUsEquityMarketOpen(ts)` | DST-correct US regular-session check for tokenized-stock logic |
 | `fetchWithRetry(url, init, opts)` | per-attempt timeout + exponential backoff on 408/429/5xx/timeouts, never on definitive 4xx |
 
@@ -82,8 +85,52 @@ if (isUsEquityMarketOpen(Date.now() / 1000)) {
 }
 ```
 
+### Backfill event history without babysitting the RPC
+
+The public RPC caps `eth_getLogs` at ~10k blocks *and* ~10k results, and rate
+limits on top. `getLogsPaged` encodes the response that actually works (learned
+running rhxbt.com's full-chain swap index): a "range too large" error is a
+**size** problem — halve the window; a 429 is a **time** problem — cool off and
+retry the *same* window, because halving multiplies the request count and makes
+it worse. After a reduction it re-grows only after 3 clean passes, so it never
+ping-pongs against the cap.
+
+```ts
+import { getLogsPaged, robinhoodChain, V2_PAIR_CREATED_EVENT } from "robinhood-chain-kit";
+import { createPublicClient, http, parseAbiItem } from "viem";
+
+const client = createPublicClient({ chain: robinhoodChain, transport: http() });
+const head = await client.getBlockNumber();
+
+// every V2 pair ever created, from genesis, over the plain public RPC
+const pairs = await getLogsPaged(
+  (fromBlock, toBlock) =>
+    client.getLogs({ event: parseAbiItem(V2_PAIR_CREATED_EVENT), fromBlock, toBlock }),
+  0n,
+  head,
+  { chunkSize: 9_500n },
+);
+```
+
+Works with any client — you supply the `getLogs` function, the kit supplies the
+judgment. For huge ranges, stream with `{ collect: false, onPage }` instead of
+accumulating.
+
+## Examples
+
+Runnable scripts in [`examples/`](examples/):
+
+- [`watch-bridge.mts`](examples/watch-bridge.mts) — capital entering the chain via the L1 gateways
+- [`scan-pools.mts`](examples/scan-pools.mts) — enumerate every DEX pool since genesis with `getLogsPaged`
+- [`market-session.mts`](examples/market-session.mts) — gate oracle-gap logic on the US session
+
+```
+cd examples && npm i && npx tsx scan-pools.mts
+```
+
 ## Notes
 
+- Unit-tested (`npm test`, CI on Node 20/22) *and* battle-tested: every module runs in production behind [rhxbt.com](https://rhxbt.com).
 - Contract addresses come from the [official chain docs](https://docs.robinhood.com/chain/) — verify independently before moving value.
 - This is an independent, unofficial community project. Not affiliated with or endorsed by Robinhood.
 
