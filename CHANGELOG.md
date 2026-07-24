@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-07-25
+
+- Packaging only, no code changes: add a modern `exports` map and
+  `sideEffects: false`. Fixes ESM resolution in bundlers whose resolvers
+  require the exports field (bundlephobia's BuildError) and enables
+  tree-shaking.
+
 ## 0.2.0 — 2026-07-24
 
 - **New: `getLogsPaged`** — adaptive `getLogs` paging for backfills over capped
