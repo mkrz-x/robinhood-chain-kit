@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — 2026-07-26
+
+- Packaging only: add the `default` condition to the exports map. Resolvers
+  that do not ask with the `import` condition (bundlephobia's build pipeline
+  among them) found no matching entry and failed with a BuildError; `default`
+  is the spec's catch-all and must come last. Verified against how ky /
+  nanoid / p-limit (ESM-only packages that build fine there) shape theirs.
+
 ## 0.3.0 — 2026-07-26
 
 - **New: Uniswap V4 events** — `V4_INITIALIZE_EVENT` and `V4_SWAP_EVENT` for
