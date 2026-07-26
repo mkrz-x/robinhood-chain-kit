@@ -3,11 +3,16 @@
   "private": true,
   "type": "module",
   "description": "Runnable examples for robinhood-chain-kit. npm i && npx tsx <example>.mts",
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
   "dependencies": {
-    "robinhood-chain-kit": "^0.2.0",
+    "robinhood-chain-kit": "file:..",
     "viem": "^2.21.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
     "tsx": "^4.19.0"
   }
 }

@@ -4,13 +4,12 @@
  *
  *   client.getLogs({ event: parseAbiItem(V2_PAIR_CREATED_EVENT), ... })
  *
- * Attribution notes from production use:
- *  - V2 Swap: the swapper is `to` (output receiver)
- *  - V3 Swap: the swapper is `recipient`
- *  - V4 Swap: `sender` is ALWAYS a periphery contract (V4 is not enterable
- *    directly) — attribute to the transaction sender instead
- *  - any of them may be a router/aggregator contract, not a person — check
- *    eth_getCode before treating an address as a wallet
+ * Actor notes from production use:
+ *  - V2 `sender` is the pool caller and `to` is the output recipient.
+ *  - V3 `sender` is the pool caller and `recipient` is the output recipient.
+ *  - V4 `sender` is normally a periphery contract; transaction.from may still
+ *    be a smart account, router, or bundler.
+ * None of these fields alone proves the economic actor behind a swap.
  *
  * V4 notes: there are no per-pool contracts — one singleton PoolManager emits
  *  every event, and pools are identified by the bytes32 `id`. A currency of
@@ -42,3 +41,55 @@ export const DEX_EVENTS = [
   V4_INITIALIZE_EVENT,
   V4_SWAP_EVENT,
 ] as const;
+
+/** Explicit event-field roles; deliberately does not label any field "swapper". */
+export const DEX_SWAP_ACTOR_FIELDS = {
+  v2: { poolCaller: "sender", outputRecipient: "to" },
+  v3: { poolCaller: "sender", outputRecipient: "recipient" },
+  v4: { poolCaller: "sender", transactionFrom: "transaction.from" },
+} as const;
+
+export interface DexDiscoveryDeployments {
+  /** Verified V2 factory addresses that emit PairCreated. */
+  v2Factories?: readonly string[];
+  /** Verified V3 factory addresses that emit PoolCreated. */
+  v3Factories?: readonly string[];
+  /** Verified V4 PoolManager singleton addresses that emit Initialize. */
+  v4PoolManagers?: readonly string[];
+}
+
+export interface DexDiscoveryTarget {
+  protocol: "v2" | "v3" | "v4";
+  address: string;
+  event:
+    | typeof V2_PAIR_CREATED_EVENT
+    | typeof V3_POOL_CREATED_EVENT
+    | typeof V4_INITIALIZE_EVENT;
+}
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * Build address-scoped pool-discovery targets. Event signatures are not
+ * identities: an untrusted contract can emit the same topic, so callers must
+ * supply factory/PoolManager addresses they have independently verified.
+ */
+export function getDexDiscoveryTargets(
+  deployments: DexDiscoveryDeployments,
+): DexDiscoveryTarget[] {
+  const targets: DexDiscoveryTarget[] = [];
+  const append = (
+    protocol: DexDiscoveryTarget["protocol"],
+    addresses: readonly string[] | undefined,
+    event: DexDiscoveryTarget["event"],
+  ) => {
+    for (const address of new Set(addresses ?? [])) {
+      if (!ADDRESS.test(address)) throw new TypeError(`Invalid ${protocol} deployment: ${address}`);
+      targets.push({ protocol, address, event });
+    }
+  };
+  append("v2", deployments.v2Factories, V2_PAIR_CREATED_EVENT);
+  append("v3", deployments.v3Factories, V3_POOL_CREATED_EVENT);
+  append("v4", deployments.v4PoolManagers, V4_INITIALIZE_EVENT);
+  return targets;
+}

@@ -1,13 +1,27 @@
-/** Robinhood Chain (Arbitrum Orbit L2) — canonical constants. */
+/** Robinhood Chain mainnet constants. */
 export const CHAIN_ID = 4663;
 export const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
 export const SEQUENCER_FEED_WS = "wss://feed.mainnet.chain.robinhood.com";
+export const SEQUENCER_URL = "https://sequencer.mainnet.chain.robinhood.com";
 export const EXPLORER_URL = "https://robinhoodchain.blockscout.com";
 
-/** Blockscout REST API base (v2) — token pages, tx lookups, stats */
-export const EXPLORER_API_URL = `${EXPLORER_URL}/api/v2`;
+/** Etherscan-compatible Blockscout endpoint used by viem verification tooling. */
+export const EXPLORER_API_URL = `${EXPLORER_URL}/api`;
+/** Blockscout REST API v2 for application-level token, transaction, and stats queries. */
+export const BLOCKSCOUT_API_V2_URL = `${EXPLORER_URL}/api/v2`;
 
-/** viem-compatible chain definition (no viem dependency required) */
+/** Robinhood Chain testnet constants. */
+export const TESTNET_CHAIN_ID = 46630;
+export const TESTNET_RPC_URL = "https://rpc.testnet.chain.robinhood.com";
+export const TESTNET_SEQUENCER_FEED_WS = "wss://feed.testnet.chain.robinhood.com";
+export const TESTNET_SEQUENCER_URL = "https://sequencer.testnet.chain.robinhood.com";
+export const TESTNET_EXPLORER_URL = "https://explorer.testnet.chain.robinhood.com";
+export const TESTNET_EXPLORER_API_URL = `${TESTNET_EXPLORER_URL}/api`;
+export const TESTNET_BLOCKSCOUT_API_V2_URL = `${TESTNET_EXPLORER_URL}/api/v2`;
+
+export const MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11";
+
+/** viem-compatible mainnet definition (no viem runtime dependency required). */
 export const robinhoodChain = {
   id: CHAIN_ID,
   name: "Robinhood Chain",
@@ -17,7 +31,36 @@ export const robinhoodChain = {
     default: { name: "Blockscout", url: EXPLORER_URL, apiUrl: EXPLORER_API_URL },
   },
   contracts: {
-    /** canonical cross-chain Multicall3 — deployed on 4663 like everywhere */
-    multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" },
+    multicall3: { address: MULTICALL3_ADDRESS },
   },
 } as const;
+
+/** viem-compatible testnet definition. */
+export const robinhoodTestnetChain = {
+  id: TESTNET_CHAIN_ID,
+  name: "Robinhood Chain Testnet",
+  nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: [TESTNET_RPC_URL] } },
+  blockExplorers: {
+    default: {
+      name: "Blockscout",
+      url: TESTNET_EXPLORER_URL,
+      apiUrl: TESTNET_EXPLORER_API_URL,
+    },
+  },
+  contracts: {
+    multicall3: { address: MULTICALL3_ADDRESS },
+  },
+  testnet: true,
+} as const;
+
+export const ROBINHOOD_CHAINS = {
+  mainnet: robinhoodChain,
+  testnet: robinhoodTestnetChain,
+} as const;
+
+export type RobinhoodNetwork = keyof typeof ROBINHOOD_CHAINS;
+
+export function getRobinhoodChain<N extends RobinhoodNetwork>(network: N) {
+  return ROBINHOOD_CHAINS[network];
+}

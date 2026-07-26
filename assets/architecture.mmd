@@ -6,9 +6,12 @@ flowchart LR
   subgraph L2["Robinhood Chain (4663)"]
     RPC["RPC + sequencer feed"]
     DEX["DEX pools\n(tokenized stocks, 24/7)"]
+    ORACLE["Chainlink feeds\n(heartbeat + pause state)"]
   end
   APP["your app"]
   GW -- "DepositInitiated\n(capital in)" --> APP
-  OB -- "WithdrawalFinalized\n(capital out)" --> APP
+  OB -- "executes withdrawal" --> GW
+  GW -- "WithdrawalFinalized\n(ERC-20 out)" --> APP
   RPC -- "robinhoodChain\n(viem-ready)" --> APP
-  DEX -- "isUsEquityMarketOpen()\ngates oracle-gap logic" --> APP
+  DEX -- "address-scoped events" --> APP
+  ORACLE -- "isFeedFresh()\nindependent of regular session" --> APP
