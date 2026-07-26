@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 - 2026-07-26
+
+- Docs only: the footer linking the author and the agent lived in a raw
+  `<p align="center">` block, which npm sanitizes away - so both links
+  rendered on GitHub and were invisible on npmjs.com. Replaced with a plain
+  markdown Links table (terminal, author, agent, source, package) that renders
+  identically on both, plus X badges in the badge row. npm serves the README
+  frozen at publish time, so this needed a release to reach the registry.
+
 ## 0.3.1 — 2026-07-26
 
 - Packaging only: add the `default` condition to the exports map. Resolvers

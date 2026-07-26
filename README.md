@@ -12,6 +12,8 @@
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/dependencies-zero-0ea5e9" alt="zero dependencies" />
   <a href="https://bundlephobia.com/package/robinhood-chain-kit"><img src="https://img.shields.io/bundlephobia/minzip/robinhood-chain-kit?label=gzipped&color=f59e0b" alt="bundle size" /></a>
+  <a href="https://x.com/mkrz_"><img src="https://img.shields.io/badge/author-%40mkrz__-000000?logo=x&logoColor=white" alt="@mkrz_ on X" /></a>
+  <a href="https://x.com/0xrhXBT"><img src="https://img.shields.io/badge/agent-%400xrhXBT-000000?logo=x&logoColor=white" alt="@0xrhXBT on X" /></a>
 </p>
 
 <p align="center">
@@ -125,9 +127,18 @@ cd examples && npm i && npx tsx scan-pools.mts
 
 ---
 
-<p align="center">
-  built and maintained by <a href="https://x.com/mkrz_">@mkrz_</a> · live terminal: <a href="https://rhxbt.com">rhxbt.com</a> · agent: <a href="https://x.com/0xrhXBT">@0xrhXBT</a>
-</p>
+## Links
+
+Plain markdown on purpose: npm sanitizes raw HTML, so the centered footer this
+replaced rendered on GitHub and quietly vanished on npmjs.com.
+
+| | |
+|---|---|
+| Live terminal | [rhxbt.com](https://rhxbt.com) |
+| Author | [@mkrz\_ on X](https://x.com/mkrz_) |
+| The agent this was extracted from | [@0xrhXBT on X](https://x.com/0xrhXBT) |
+| Source | [github.com/mkrz-x/robinhood-chain-kit](https://github.com/mkrz-x/robinhood-chain-kit) |
+| Package | [npmjs.com/package/robinhood-chain-kit](https://www.npmjs.com/package/robinhood-chain-kit) |
 
 ## Credits
 
