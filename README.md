@@ -37,7 +37,7 @@ primitives typed, tested, and free of runtime dependencies.
 | `chain` | mainnet + testnet RPC, sequencer feed, explorer, separate Blockscout `/api` + REST `/api/v2`, and viem-compatible chain objects |
 | `bridge` | documented mainnet/testnet L1 + L2 protocol contracts, Arbitrum precompiles, and gateway-emitted deposit/withdrawal events |
 | `dex` | **V2/V3/V4** event signatures, explicit caller/recipient roles, and address-scoped factory/PoolManager discovery targets |
-| `feeds` | the Chainlink **feed directory URL** for 4663 — every live oracle on the chain, including the tokenized-stock feeds |
+| `feeds` / Oracle Guard | strict Chainlink directory loading, typed feed lookup and read calls, exact bigint price formatting, and fail-closed round/sequencer/pause assessment |
 | `getLogsPaged(getLogs, from, to, opts)` | exact-block-count log backfill: shrinks only on recognized size errors, bounds 429 retries, supports cancellation, and never retries consumer callbacks |
 | `getUsEquityMarketSession(ts)` | DST-, holiday-, and early-close-aware US regular-session context |
 | `isFeedFresh(updatedAt, heartbeat, now)` | heartbeat freshness independent from the regular session; Stock Token feeds currently publish 24/5 |
@@ -151,6 +151,47 @@ V2 `to` and V3 `recipient` are output recipients, not guaranteed economic
 actors. V4 `sender` is normally periphery. Treat transaction origin, routers,
 smart accounts, and beneficiaries as separate roles.
 
+### Guard a Chainlink price round
+
+Oracle Guard loads a stable, validated subset of the live Chainlink directory
+and keeps answers as `bigint` until exact decimal formatting. A round is usable
+only when its answer and timestamp are valid, its heartbeat is fresh, the
+sequencer is up beyond the caller's recovery grace period, and corporate-action
+state is explicitly active or not applicable.
+
+```ts
+import {
+  assessOracleHealth,
+  findChainlinkFeeds,
+  loadChainlinkFeedDirectory,
+} from "robinhood-chain-kit";
+
+const feeds = await loadChainlinkFeedDirectory();
+const [feed] = findChainlinkFeeds(feeds, { baseAsset: "GOOGL", quoteAsset: "USD" });
+if (!feed) throw new Error("GOOGL/USD feed is missing");
+
+const health = assessOracleHealth({
+  feed,
+  round: {
+    roundId: 10n,
+    answer: 12_345_678_900n,
+    updatedAtSeconds: 1_000n,
+    answeredInRound: 10n,
+  },
+  nowSeconds: 1_200,
+  sequencer: { status: "up", sinceSeconds: 100, gracePeriodSeconds: 60 },
+  pauseState: "active",
+});
+
+if (!health.usable) console.error(health.issues);
+else console.log(health.formattedAnswer); // 123.45678900
+```
+
+`pauseState: "unknown"` and `sequencer: { status: "unknown" }` fail closed.
+Use `"not-applicable"` only for assets that do not have corporate-action
+pauses. Oracle Guard reports safety inputs; it never emits buy/sell decisions
+or invents fallback prices.
+
 ## Examples
 
 Runnable scripts in [`examples/`](examples/):
@@ -158,11 +199,13 @@ Runnable scripts in [`examples/`](examples/):
 - [`watch-bridge.mts`](examples/watch-bridge.mts) — recent canonical ERC-20 deposits, with each token's actual decimals
 - [`scan-pools.mts`](examples/scan-pools.mts) — V2/V3/V4 discovery from verified deployment addresses, with streaming and resume bounds
 - [`market-session.mts`](examples/market-session.mts) — report regular-session context without claiming oracle freshness
+- [`oracle-guard.mts`](examples/oracle-guard.mts) — read a live feed and fail closed on unknown sequencer or pause state
 
 ```
 cd examples && npm i
 V2_FACTORIES=0x... V3_FACTORIES=0x... V4_POOL_MANAGERS=0x... npx tsx scan-pools.mts
 ETHEREUM_RPC_URL=https://your-rpc.example npx tsx watch-bridge.mts
+npx tsx oracle-guard.mts # defaults to unknown pause/sequencer state and fails closed
 ```
 
 ## Notes

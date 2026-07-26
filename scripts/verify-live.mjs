@@ -9,7 +9,13 @@ import {
   TESTNET_EXPLORER_API_URL,
   TESTNET_RPC_URL,
   CHAINLINK_FEED_DIRECTORY_URL,
+  fetchWithRetry,
+  parseChainlinkFeedDirectory,
 } from "../dist/index.js";
+import {
+  validateBlockscoutStats,
+  validateEtherscanBlockNumber,
+} from "./live-canary-validation.mjs";
 
 const ETHEREUM_RPC_URL = process.env.ETHEREUM_RPC_URL ?? "https://ethereum-rpc.publicnode.com";
 const SEPOLIA_RPC_URL =
@@ -20,15 +26,31 @@ const assert = (condition, message) => {
 };
 
 let rpcId = 0;
+async function requestJson(url, init = {}) {
+  const response = await fetchWithRetry(url, init, {
+    timeoutMs: 10_000,
+    attempts: 3,
+    baseDelayMs: 500,
+    maxDelayMs: 5_000,
+    retryUnsafeMethods: init.method === "POST",
+  });
+  assert(response.ok, `${url} returned HTTP ${response.status}`);
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new Error(`${url} returned invalid JSON`, { cause: error });
+  }
+}
+
 async function rpc(url, method, params = []) {
-  const response = await fetch(url, {
+  const body = await requestJson(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
   });
-  assert(response.ok, `${url} returned HTTP ${response.status}`);
-  const body = await response.json();
+  assert(typeof body === "object" && body !== null, `${url} ${method}: malformed JSON-RPC`);
   if (body.error) throw new Error(`${url} ${method}: ${JSON.stringify(body.error)}`);
+  assert("result" in body, `${url} ${method}: missing JSON-RPC result`);
   return body.result;
 }
 
@@ -50,12 +72,6 @@ async function verifyL1(name, rpcUrl, contracts) {
   console.log(`${name}: ${Object.keys(contracts).length} L1 deployments verified`);
 }
 
-async function expectJson(url) {
-  const response = await fetch(url);
-  assert(response.ok, `${url} returned HTTP ${response.status}`);
-  return response.json();
-}
-
 await verifyNetwork("mainnet", RPC_URL, CHAIN_ID, PROTOCOL_CONTRACTS.mainnet.l2);
 await verifyNetwork("testnet", TESTNET_RPC_URL, TESTNET_CHAIN_ID, PROTOCOL_CONTRACTS.testnet.l2);
 await verifyL1("mainnet L1", ETHEREUM_RPC_URL, PROTOCOL_CONTRACTS.mainnet.l1);
@@ -64,20 +80,19 @@ await verifyL1("testnet L1", SEPOLIA_RPC_URL, PROTOCOL_CONTRACTS.testnet.l1);
 for (const url of [
   `${EXPLORER_API_URL}?module=block&action=eth_block_number`,
   `${TESTNET_EXPLORER_API_URL}?module=block&action=eth_block_number`,
+]) {
+  validateEtherscanBlockNumber(await requestJson(url));
+}
+for (const url of [
   `${BLOCKSCOUT_API_V2_URL}/stats`,
   `${TESTNET_BLOCKSCOUT_API_V2_URL}/stats`,
 ]) {
-  await expectJson(url);
+  validateBlockscoutStats(await requestJson(url));
 }
 console.log("Blockscout Etherscan-compatible and REST endpoints verified");
 
-const feeds = await expectJson(CHAINLINK_FEED_DIRECTORY_URL);
-assert(Array.isArray(feeds) && feeds.length > 0, "Chainlink feed directory is empty or malformed");
-assert(
-  feeds.every((feed) => /^0x[0-9a-fA-F]{40}$/.test(feed.proxyAddress ?? "")),
-  "Chainlink feed directory contains an invalid proxyAddress",
-);
+const feeds = parseChainlinkFeedDirectory(await requestJson(CHAINLINK_FEED_DIRECTORY_URL));
 
-const assets = await expectJson("https://api.robinhood.com/rhj/assets");
+const assets = await requestJson("https://api.robinhood.com/rhj/assets");
 assert(Array.isArray(assets.assets) && assets.assets.length > 0, "RHJ assets response is malformed");
 console.log(`${feeds.length} Chainlink feeds and ${assets.assets.length} RHJ assets verified`);
