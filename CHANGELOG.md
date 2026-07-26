@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 — 2026-07-26
+
+- **New: Uniswap V4 events** — `V4_INITIALIZE_EVENT` and `V4_SWAP_EVENT` for
+  the singleton PoolManager (pools keyed by `bytes32 id`, no per-pool
+  contracts), plus `V4_NATIVE_CURRENCY` (address(0) = the chain's native
+  asset). Attribution note: V4's `sender` is always a periphery contract —
+  attribute swaps to the transaction sender. Both added to `DEX_EVENTS`.
+- **Chain object**: `robinhoodChain` now carries
+  `blockExplorers.default.apiUrl` (Blockscout `/api/v2`, also exported as
+  `EXPLORER_API_URL`) and `contracts.multicall3`, matching what a viem
+  client needs for multicall and explorer-API lookups.
+- **New: `feeds` module** — `CHAINLINK_FEED_DIRECTORY_URL`, the Chainlink
+  per-chain feed directory for 4663 (every live oracle, including the
+  tokenized-stock feeds). Constant only; the kit stays zero-dependency.
+- **Docs**: the architecture diagram is now a pre-rendered SVG
+  (`assets/architecture.svg`, source kept at `assets/architecture.mmd`) so it
+  renders on npmjs.com too — npm does not render mermaid code fences.
+
 ## 0.2.1 — 2026-07-25
 
 - Packaging only, no code changes: add a modern `exports` map and

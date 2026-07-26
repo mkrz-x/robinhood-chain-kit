@@ -1,0 +1,14 @@
+flowchart LR
+  subgraph L1["Ethereum L1"]
+    GW["Gateways\n(ERC20 / Custom / WETH)"]
+    OB["Outbox"]
+  end
+  subgraph L2["Robinhood Chain (4663)"]
+    RPC["RPC + sequencer feed"]
+    DEX["DEX pools\n(tokenized stocks, 24/7)"]
+  end
+  APP["your app"]
+  GW -- "DepositInitiated\n(capital in)" --> APP
+  OB -- "WithdrawalFinalized\n(capital out)" --> APP
+  RPC -- "robinhoodChain\n(viem-ready)" --> APP
+  DEX -- "isUsEquityMarketOpen()\ngates oracle-gap logic" --> APP

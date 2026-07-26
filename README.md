@@ -28,31 +28,19 @@ Every project on this chain re-derives the same primitives: the chain constants,
 
 | Module | What it gives you |
 |---|---|
-| `chain` | chain id, RPC, **sequencer feed WS**, explorer, a viem-compatible chain object |
+| `chain` | chain id, RPC, **sequencer feed WS**, explorer + **Blockscout API url**, a viem-compatible chain object with **`multicall3`** wired |
 | `bridge` | every canonical L1 contract (bridge, inbox, outbox, rollup, 3 gateways) + `DepositInitiated` / `WithdrawalFinalized` event signatures |
-| `dex` | the V2/V3 `PairCreated` / `PoolCreated` / `Swap` event signatures observed live on the chain, plus who the swapper actually is on each |
+| `dex` | the **V2/V3/V4** `PairCreated` / `PoolCreated` / `Initialize` / `Swap` event signatures observed live on the chain, plus who the swapper actually is on each (V4's singleton PoolManager keys pools by `bytes32 id` — no per-pool contracts) |
+| `feeds` | the Chainlink **feed directory URL** for 4663 — every live oracle on the chain, including the tokenized-stock feeds |
 | `getLogsPaged(getLogs, from, to, opts)` | adaptive log backfill over a capped RPC: halves the span on dense windows, cools off (never halves) on 429, re-grows only after consecutive clean passes |
 | `isUsEquityMarketOpen(ts)` | DST-correct US regular-session check for tokenized-stock logic |
 | `fetchWithRetry(url, init, opts)` | per-attempt timeout + exponential backoff on 408/429/5xx/timeouts, never on definitive 4xx |
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-  subgraph L1["Ethereum L1"]
-    GW["Gateways\n(ERC20 / Custom / WETH)"]
-    OB["Outbox"]
-  end
-  subgraph L2["Robinhood Chain (4663)"]
-    RPC["RPC + sequencer feed"]
-    DEX["DEX pools\n(tokenized stocks, 24/7)"]
-  end
-  APP["your app"]
-  GW -- "DepositInitiated\n(capital in)" --> APP
-  OB -- "WithdrawalFinalized\n(capital out)" --> APP
-  RPC -- "robinhoodChain\n(viem-ready)" --> APP
-  DEX -- "isUsEquityMarketOpen()\ngates oracle-gap logic" --> APP
-```
+![How it fits together](https://raw.githubusercontent.com/mkrz-x/robinhood-chain-kit/main/assets/architecture.svg)
+
+<sub>source: [`assets/architecture.mmd`](assets/architecture.mmd) — rendered to SVG so it displays on npm too (npm does not render mermaid)</sub>
 
 ## Install
 
