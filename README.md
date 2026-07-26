@@ -11,6 +11,7 @@
   <img src="https://img.shields.io/badge/chain%20id-4663-8b5cf6" alt="chain id 4663" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/dependencies-zero-0ea5e9" alt="zero dependencies" />
+  <a href="https://bundlephobia.com/package/robinhood-chain-kit"><img src="https://img.shields.io/bundlephobia/minzip/robinhood-chain-kit?label=gzipped&color=f59e0b" alt="bundle size" /></a>
 </p>
 
 <p align="center">
