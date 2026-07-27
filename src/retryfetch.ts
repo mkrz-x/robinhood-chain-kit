@@ -1,27 +1,96 @@
 /**
- * Retrying fetch for flaky upstreams (twitterapi.io in particular, which sits
- * behind Cloudflare and throws 520s + stalls under load). Production showed
- * these failures are transient bursts: a single retry usually lands, but every
- * call site was a bare fetch, so one 520 lost a whole tick's work.
+ * Retrying fetch for transient HTTP failures.
  *
- * Contract mirrors withRpcRetry (collectors/rpc.ts) + HttpClient's status
- * logic (pipeline/http.ts): retry on thrown fetch/timeout errors and on
- * 408/429/5xx responses; any other non-ok response (definitive 4xx) is
- * returned immediately for the caller's existing `!res.ok` handling. The
- * timeout applies PER ATTEMPT, so worst case is attempts × timeoutMs plus
- * backoff — callers all run under `protect: true` crons, so overlap is safe.
+ * Retries thrown network/per-attempt-timeout failures and 408/429/5xx
+ * responses. Definitive 4xx responses are returned immediately. POST/PATCH
+ * requests are attempted once unless `retryUnsafeMethods` is explicitly set;
+ * callers should use that option only with an idempotency key or equivalent.
+ * The caller's AbortSignal always wins over per-attempt timeouts and backoff.
  */
 export interface FetchRetryOpts {
   /** per-attempt timeout in ms (an AbortSignal.timeout per try) */
   timeoutMs: number;
   /** total attempts including the first (default 3) */
   attempts?: number;
+  /** permit retries for non-idempotent methods such as POST/PATCH (default false).
+   * Use only when the operation is protected by an idempotency key or equivalent. */
+  retryUnsafeMethods?: boolean;
+  /** initial exponential-backoff delay in ms (default 500) */
+  baseDelayMs?: number;
+  /** maximum backoff or Retry-After delay in ms (default 30_000) */
+  maxDelayMs?: number;
+  /** proportional random jitter from 0 to 1 (default 0.2) */
+  jitter?: number;
   /** injectable for tests, mirroring the fetchImpl params already used by
    * the social package's twitterapi.io modules */
   fetchImpl?: typeof fetch;
+  /** injectable sleeper and random source for deterministic tests */
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
 }
 
 const RETRYABLE_STATUS = (s: number) => s === 408 || s === 429 || s >= 500;
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
+const defaultSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    signal?.throwIfAborted();
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
+
+    function cleanup() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+    }
+    function done() {
+      cleanup();
+      resolve();
+    }
+    function aborted() {
+      cleanup();
+      try {
+        signal?.throwIfAborted();
+      } catch (error) {
+        reject(error);
+      }
+    }
+  });
+
+const retryAfterMs = (response: Response): number | undefined => {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+};
+
+const validateOptions = (
+  timeoutMs: number,
+  attempts: number,
+  baseDelayMs: number,
+  maxDelayMs: number,
+  jitter: number,
+) => {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("timeoutMs must be a positive finite number");
+  }
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new RangeError("attempts must be a positive integer");
+  }
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new RangeError("baseDelayMs must be a non-negative finite number");
+  }
+  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new RangeError("maxDelayMs must be a non-negative finite number");
+  }
+  if (baseDelayMs > maxDelayMs) {
+    throw new RangeError("baseDelayMs cannot exceed maxDelayMs");
+  }
+  if (!Number.isFinite(jitter) || jitter < 0 || jitter > 1) {
+    throw new RangeError("jitter must be between 0 and 1");
+  }
+};
 
 export async function fetchWithRetry(
   url: string | URL,
@@ -29,19 +98,46 @@ export async function fetchWithRetry(
   opts: FetchRetryOpts,
 ): Promise<Response> {
   const attempts = opts.attempts ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 500;
+  const maxDelayMs = opts.maxDelayMs ?? 30_000;
+  const jitter = opts.jitter ?? 0.2;
+  validateOptions(opts.timeoutMs, attempts, baseDelayMs, maxDelayMs, jitter);
+
+  const method = (init.method ?? "GET").toUpperCase();
+  const allowedAttempts =
+    opts.retryUnsafeMethods || IDEMPOTENT_METHODS.has(method) ? attempts : 1;
   const doFetch = opts.fetchImpl ?? fetch;
+  const sleep = opts.sleep ?? ((ms: number) => defaultSleep(ms, init.signal ?? undefined));
+  const random = opts.random ?? Math.random;
   let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; i < allowedAttempts; i++) {
+    init.signal?.throwIfAborted();
+    let discardedResponse: Response | undefined;
+    let serverDelayMs: number | undefined;
     try {
-      const res = await doFetch(url, { ...init, signal: AbortSignal.timeout(opts.timeoutMs) });
+      const timeoutSignal = AbortSignal.timeout(opts.timeoutMs);
+      const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+      const res = await doFetch(url, { ...init, signal });
       if (!RETRYABLE_STATUS(res.status)) return res; // ok OR definitive 4xx — caller decides
       lastErr = new Error(`HTTP ${res.status}`);
-      if (i === attempts - 1) return res; // out of budget: hand back the real response
+      if (i === allowedAttempts - 1) return res; // out of budget: hand back the real response
+      discardedResponse = res;
+      serverDelayMs = retryAfterMs(res);
     } catch (err) {
+      init.signal?.throwIfAborted();
       lastErr = err;
-      if (i === attempts - 1) throw lastErr;
+      if (i === allowedAttempts - 1) throw lastErr;
     }
-    await new Promise((r) => setTimeout(r, 500 * 2 ** i));
+    if (discardedResponse?.body) {
+      await discardedResponse.body.cancel().catch(() => undefined);
+    }
+    const exponentialDelay = Math.min(maxDelayMs, baseDelayMs * 2 ** i);
+    const sample = random();
+    const boundedSample = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0.5;
+    const jitteredDelay = exponentialDelay * (1 - jitter + 2 * jitter * boundedSample);
+    const delay = Math.min(maxDelayMs, Math.max(serverDelayMs ?? 0, jitteredDelay));
+    await sleep(delay);
+    init.signal?.throwIfAborted();
   }
   // unreachable (loop always returns or throws on the last attempt)
   throw lastErr;

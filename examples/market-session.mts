@@ -1,18 +1,13 @@
-/** Is the US equity regular session open right now?
+/**
+ * Report US regular-session context.
  *
- * Why you care on this chain: tokenized stocks trade 24/7 on the DEX while
- * Chainlink equity feeds freeze outside market hours — a growing gap after
- * the close is EXPECTED, not an arb.
- *
- *   npx tsx market-session.mts
+ * Feed freshness is intentionally separate: Robinhood Stock Token feeds use
+ * a documented 24/5 schedule, so inspect updatedAt/heartbeat and pause state.
  */
-import { isUsEquityMarketOpen } from "robinhood-chain-kit";
+import { getUsEquityMarketSession } from "robinhood-chain-kit";
 
-const now = Math.floor(Date.now() / 1000);
-const open = isUsEquityMarketOpen(now);
-console.log(`US equity regular session: ${open ? "OPEN" : "CLOSED"}`);
-console.log(
-  open
-    ? "equity oracle prices are live — DEX vs quote divergence is meaningful"
-    : "equity oracles are frozen at the last print — DEX drift is normal",
-);
+const now = Date.now() / 1000;
+const session = getUsEquityMarketSession(now);
+console.log(`US equity regular session: ${session.phase.toUpperCase()}`);
+console.log(`reason: ${session.reason}${session.holiday ? ` (${session.holiday})` : ""}`);
+console.log("Do not infer oracle freshness from this result; validate the feed heartbeat separately.");

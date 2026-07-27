@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0 — 2026-07-26
+
+- **Correct paged-log semantics**: `chunkSize` is now an exact inclusive block
+  count; callback failures are never mistaken for RPC failures; only recognized
+  range-limit errors shrink the window; 429 retries are bounded; invalid
+  options fail fast; and callers can cancel between requests and retry delays.
+- **Safe retrying fetch**: caller abort signals are preserved, retry options are
+  validated, unsafe methods are not retried without explicit authorization,
+  `Retry-After` and bounded jittered backoff are supported, and discarded
+  response bodies are cancelled. Timing hooks make the test suite immediate.
+- **Market and oracle correctness**: added `getUsEquityMarketSession` with
+  scheduled US exchange holidays and early closes, made invalid timestamps
+  safely closed, and added `isFeedFresh` so the regular session is no longer
+  presented as a proxy for Robinhood Stock Token feeds' 24/5 freshness.
+- **Chain configuration**: split the Etherscan-compatible Blockscout `/api`
+  from REST `/api/v2`, added Robinhood Chain testnet, and added the documented
+  mainnet/testnet L1, L2, and Arbitrum precompile registries.
+- **DEX and bridge accuracy**: replaced ambiguous "swapper" labels with caller
+  and recipient roles; added address-scoped DEX discovery targets; documented
+  that L1 gateways emit `WithdrawalFinalized`; added V4 to the pool example;
+  and removed the bridge example's hard-coded RPC and 18-decimal assumption.
+- **Packaging and CI**: dual ESM/CJS output, Node 20.3+ engine declaration,
+  reproducible `prepack`, source maps, publint/Are the Types Wrong checks,
+  example type-checking, restricted workflow permissions, pinned actions, and
+  the complete canonical MIT license.
+
 ## 0.3.2 - 2026-07-26
 
 - Docs only: the footer linking the author and the agent lived in a raw

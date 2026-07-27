@@ -15,8 +15,8 @@ describe("getLogsPaged", () => {
       25n,
       { chunkSize: 10n, sleep: noSleep },
     );
-    expect(ranges).toEqual([[0n, 10n], [11n, 21n], [22n, 25n]]);
-    expect(logs).toEqual([0, 11, 22]);
+    expect(ranges).toEqual([[0n, 9n], [10n, 19n], [20n, 25n]]);
+    expect(logs).toEqual([0, 10, 20]);
   });
 
   it("halves the span on a size error and still covers the full range", async () => {
@@ -100,6 +100,115 @@ describe("getLogsPaged", () => {
       { chunkSize: 10n, collect: false, onPage: (l) => void pages.push(l), sleep: noSleep },
     );
     expect(out).toEqual([]);
-    expect(pages).toEqual([[0], [11]]);
+    expect(pages).toEqual([[0], [10]]);
+  });
+
+  it("does not retry or duplicate a page when the consumer callback fails", async () => {
+    let calls = 0;
+    await expect(
+      getLogsPaged(
+        async () => {
+          calls += 1;
+          return [42];
+        },
+        0n,
+        0n,
+        {
+          chunkSize: 4n,
+          minChunk: 1n,
+          sleep: noSleep,
+          onPage: async () => {
+            throw new Error("sink failed");
+          },
+        },
+      ),
+    ).rejects.toThrow("sink failed");
+    expect(calls).toBe(1);
+  });
+
+  it("rethrows fatal errors without shrinking the requested range", async () => {
+    const ranges: [bigint, bigint][] = [];
+    await expect(
+      getLogsPaged(
+        async (from, to) => {
+          ranges.push([from, to]);
+          throw new Error("401 unauthorized");
+        },
+        0n,
+        20n,
+        { chunkSize: 8n, minChunk: 2n, sleep: noSleep },
+      ),
+    ).rejects.toThrow("401 unauthorized");
+    expect(ranges).toEqual([[0n, 7n]]);
+  });
+
+  it("does not mistake an invalid block-range query for a provider size limit", async () => {
+    const ranges: [bigint, bigint][] = [];
+    await expect(
+      getLogsPaged(
+        async (from, to) => {
+          ranges.push([from, to]);
+          throw new Error("invalid block range parameters");
+        },
+        0n,
+        20n,
+        { chunkSize: 8n, minChunk: 1n, sleep: noSleep },
+      ),
+    ).rejects.toThrow("invalid block range parameters");
+    expect(ranges).toEqual([[0n, 7n]]);
+  });
+
+  it("stops retrying a rate-limited page when its retry budget is exhausted", async () => {
+    let calls = 0;
+    await expect(
+      getLogsPaged(
+        async () => {
+          calls += 1;
+          if (calls <= 2) throw new Error("HTTP 429");
+          return [];
+        },
+        0n,
+        0n,
+        { maxRetries: 1, sleep: noSleep },
+      ),
+    ).rejects.toThrow("HTTP 429");
+    expect(calls).toBe(2);
+  });
+
+  it("honors an already-aborted signal before requesting a page", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("stop"));
+    let calls = 0;
+    await expect(
+      getLogsPaged(
+        async () => {
+          calls += 1;
+          return [];
+        },
+        0n,
+        0n,
+        { signal: controller.signal, sleep: noSleep },
+      ),
+    ).rejects.toThrow("stop");
+    expect(calls).toBe(0);
+  });
+
+  it.each([
+    ["chunkSize", { chunkSize: 0n }],
+    ["minChunk", { minChunk: 0n }],
+    ["minimum greater than maximum", { chunkSize: 4n, minChunk: 5n }],
+    ["regrowAfter", { regrowAfter: 0 }],
+    ["cooldownMs", { cooldownMs: -1 }],
+    ["maxRetries", { maxRetries: -1 }],
+  ])("rejects invalid %s options", async (_label, options) => {
+    await expect(
+      getLogsPaged(async () => [], 1n, 0n, { ...options, sleep: noSleep }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it("rejects negative absolute block ranges", async () => {
+    await expect(getLogsPaged(async () => [], -1n, 0n, { sleep: noSleep })).rejects.toThrow(
+      RangeError,
+    );
   });
 });
