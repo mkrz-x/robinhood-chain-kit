@@ -5,6 +5,8 @@
  * responses. Definitive 4xx responses are returned immediately. POST/PATCH
  * requests are attempted once unless `retryUnsafeMethods` is explicitly set;
  * callers should use that option only with an idempotency key or equivalent.
+ * Retryable one-shot bodies require `bodyFactory` so every attempt gets a
+ * fresh stream or async iterable.
  * The caller's AbortSignal always wins over per-attempt timeouts and backoff.
  */
 export interface FetchRetryOpts {
@@ -27,10 +29,23 @@ export interface FetchRetryOpts {
   /** injectable sleeper and random source for deterministic tests */
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  /**
+   * Create a fresh body for every attempt. Required when a retryable request
+   * uses a one-shot stream or async iterable; do not also set init.body.
+   */
+  bodyFactory?: () => BodyInit | null;
 }
 
 const RETRYABLE_STATUS = (s: number) => s === 408 || s === 429 || s >= 500;
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
+const isOneShotBody = (body: BodyInit | null | undefined) =>
+  (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) ||
+  (typeof body === "object" &&
+    body !== null &&
+    (("getReader" in body && typeof body.getReader === "function") ||
+      (Symbol.asyncIterator in body &&
+        typeof (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] ===
+          "function")));
 const defaultSleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     signal?.throwIfAborted();
@@ -106,18 +121,28 @@ export async function fetchWithRetry(
   const method = (init.method ?? "GET").toUpperCase();
   const allowedAttempts =
     opts.retryUnsafeMethods || IDEMPOTENT_METHODS.has(method) ? attempts : 1;
+  if (opts.bodyFactory !== undefined && typeof opts.bodyFactory !== "function") {
+    throw new TypeError("bodyFactory must be a function");
+  }
+  if (opts.bodyFactory && init.body != null) {
+    throw new TypeError("Set bodyFactory or init.body, not both");
+  }
+  if (allowedAttempts > 1 && !opts.bodyFactory && isOneShotBody(init.body)) {
+    throw new TypeError("Retrying a streamed body requires bodyFactory");
+  }
   const doFetch = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? ((ms: number) => defaultSleep(ms, init.signal ?? undefined));
   const random = opts.random ?? Math.random;
   let lastErr: unknown;
   for (let i = 0; i < allowedAttempts; i++) {
     init.signal?.throwIfAborted();
+    const attemptBody = opts.bodyFactory ? opts.bodyFactory() : init.body;
     let discardedResponse: Response | undefined;
     let serverDelayMs: number | undefined;
     try {
       const timeoutSignal = AbortSignal.timeout(opts.timeoutMs);
       const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
-      const res = await doFetch(url, { ...init, signal });
+      const res = await doFetch(url, { ...init, body: attemptBody, signal });
       if (!RETRYABLE_STATUS(res.status)) return res; // ok OR definitive 4xx — caller decides
       lastErr = new Error(`HTTP ${res.status}`);
       if (i === allowedAttempts - 1) return res; // out of budget: hand back the real response

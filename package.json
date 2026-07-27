@@ -1,7 +1,7 @@
 {
   "name": "robinhood-chain-kit",
-  "version": "0.4.0",
-  "description": "Chain constants, L1 bridge contracts, US market-hours and retry helpers for building on Robinhood Chain (Arbitrum Orbit L2, chain id 4663). By rhxbt.com.",
+  "version": "0.5.0",
+  "description": "Oracle Guard, chain constants, bridge contracts, market sessions, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -13,7 +13,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --sourcemap --clean",
     "check:types": "tsc -p tsconfig.json --noEmit",
-    "check:package": "publint && attw --pack .",
+    "check:package": "publint && attw --pack . && npm run check:packed",
+    "check:packed": "node scripts/check-packed.mjs",
     "check:examples": "npm --prefix examples run check",
     "check:live": "npm run build && node scripts/verify-live.mjs",
     "test": "vitest run",
@@ -53,7 +54,10 @@
     "evm",
     "viem",
     "getlogs",
-    "indexer"
+    "indexer",
+    "oracle-guard",
+    "chainlink",
+    "price-feeds"
   ],
   "sideEffects": false,
   "exports": {

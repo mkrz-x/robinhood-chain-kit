@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { fetchWithRetry } from "./retryfetch.js";
 
@@ -144,6 +145,83 @@ describe("fetchWithRetry", () => {
     );
     expect(response.status).toBe(200);
     expect(calls()).toBe(2);
+  });
+
+  it("rejects retrying a one-shot stream without a per-attempt body factory", async () => {
+    let calls = 0;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("payload"));
+        controller.close();
+      },
+    });
+    await expect(
+      fetchWithRetry(
+        "https://x.test",
+        { method: "PUT", body },
+        {
+          timeoutMs: 1000,
+          attempts: 2,
+          fetchImpl: async () => {
+            calls += 1;
+            return res(503);
+          },
+          sleep: noSleep,
+        },
+      ),
+    ).rejects.toThrow(/bodyFactory/);
+    expect(calls).toBe(0);
+  });
+
+  it("rejects retrying a Node async-iterable stream before making a request", async () => {
+    let calls = 0;
+    await expect(
+      fetchWithRetry(
+        "https://x.test",
+        { method: "PUT", body: Readable.from(["payload"]) as never },
+        {
+          timeoutMs: 1000,
+          attempts: 2,
+          fetchImpl: async () => {
+            calls += 1;
+            return res(503);
+          },
+          sleep: noSleep,
+        },
+      ),
+    ).rejects.toThrow(/bodyFactory/);
+    expect(calls).toBe(0);
+  });
+
+  it("creates a fresh request body for every authorized attempt", async () => {
+    const seen: string[] = [];
+    let factoryCalls = 0;
+    const response = await fetchWithRetry(
+      "https://x.test",
+      { method: "POST", headers: { "Idempotency-Key": "request-1" } },
+      {
+        timeoutMs: 1000,
+        attempts: 2,
+        retryUnsafeMethods: true,
+        bodyFactory: () => {
+          factoryCalls += 1;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`payload-${factoryCalls}`));
+              controller.close();
+            },
+          });
+        },
+        fetchImpl: async (_url, init) => {
+          seen.push(await new Response(init?.body).text());
+          return seen.length === 1 ? res(503) : res(200);
+        },
+        sleep: noSleep,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(factoryCalls).toBe(2);
+    expect(seen).toEqual(["payload-1", "payload-2"]);
   });
 
   it.each([

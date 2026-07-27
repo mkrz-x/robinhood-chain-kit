@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 — 2026-07-26
+
+- **Oracle Guard**: added a strict Chainlink feed-directory loader and parser,
+  metadata queries, Aggregator V3 ABI/read helpers, exact bigint price
+  formatting, and a fail-closed health assessment that reports heartbeat,
+  round, sequencer, recovery-grace, and corporate-action issues together.
+- **Replay-safe fetches**: retryable one-shot request bodies now require a
+  per-attempt `bodyFactory`, preventing consumed streams from failing on later
+  attempts.
+- **Release evidence**: live canaries now use bounded retries/timeouts and
+  validate explorer JSON shapes, while package checks execute both ESM import
+  and CommonJS require from a clean tarball installation.
+
 ## 0.4.0 — 2026-07-26
 
 - **Correct paged-log semantics**: `chunkSize` is now an exact inclusive block
