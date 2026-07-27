@@ -1,7 +1,7 @@
 {
   "name": "robinhood-chain-kit",
-  "version": "0.5.0",
-  "description": "Oracle Guard, chain constants, bridge contracts, market sessions, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
+  "version": "0.6.0",
+  "description": "Transaction preflight, Oracle Guard, chain constants, bridge contracts, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -57,7 +57,10 @@
     "indexer",
     "oracle-guard",
     "chainlink",
-    "price-feeds"
+    "price-feeds",
+    "transaction-preflight",
+    "transaction-simulation",
+    "action-planner"
   ],
   "sideEffects": false,
   "exports": {

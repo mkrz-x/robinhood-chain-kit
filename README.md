@@ -38,6 +38,7 @@ primitives typed, tested, and free of runtime dependencies.
 | `bridge` | documented mainnet/testnet L1 + L2 protocol contracts, Arbitrum precompiles, and gateway-emitted deposit/withdrawal events |
 | `dex` | **V2/V3/V4** event signatures, explicit caller/recipient roles, and address-scoped factory/PoolManager discovery targets |
 | `feeds` / Oracle Guard | strict Chainlink directory loading, typed feed lookup and read calls, exact bigint price formatting, and fail-closed round/sequencer/pause assessment |
+| `preflight` / Transaction Firewall | strict action decoding, injected simulation and identity evidence, exact balance/fee/market checks, and withheld-or-ready transaction plans |
 | `getLogsPaged(getLogs, from, to, opts)` | exact-block-count log backfill: shrinks only on recognized size errors, bounds 429 retries, supports cancellation, and never retries consumer callbacks |
 | `getUsEquityMarketSession(ts)` | DST-, holiday-, and early-close-aware US regular-session context |
 | `isFeedFresh(updatedAt, heartbeat, now)` | heartbeat freshness independent from the regular session; Stock Token feeds currently publish 24/5 |
@@ -192,6 +193,81 @@ Use `"not-applicable"` only for assets that do not have corporate-action
 pauses. Oracle Guard reports safety inputs; it never emits buy/sell decisions
 or invents fallback prices.
 
+### Preflight a transaction before signing
+
+Transaction Firewall separates a transaction's claimed calldata shape from
+independent evidence about the RPC chain, simulation, target bytecode,
+contract and asset identity, approval spender, balances, allowances, gas,
+fees, Oracle Guard state, and market execution risk. Caller-supplied gas and
+fee caps are never accepted as estimates: they are compared with independent
+adapter evidence before a plan can become ready.
+
+```ts
+import { inspectTransaction } from "robinhood-chain-kit";
+
+const report = await inspectTransaction(
+  {
+    chainId: 4663,
+    from: "0x1111111111111111111111111111111111111111",
+    to: "0x2222222222222222222222222222222222222222",
+    value: 1_000_000_000_000_000n,
+  },
+  {
+    adapter: {
+      getChainId: () => publicClient.getChainId(),
+      simulate: async (request) => {
+        try {
+          await publicClient.call({
+            account: request.from,
+            to: request.to,
+            data: request.data,
+            value: request.value,
+          });
+          return { success: true };
+        } catch (error) {
+          return { success: false, revertReason: String(error) };
+        }
+      },
+      getCode: async (address) =>
+        (await publicClient.getBytecode({ address })) ?? "0x",
+      getNativeBalance: (owner) => publicClient.getBalance({ address: owner }),
+      estimateGas: (request) =>
+        publicClient.estimateGas({
+          account: request.from,
+          to: request.to,
+          data: request.data,
+          value: request.value,
+        }),
+      getFeePerGas: () => publicClient.getGasPrice(),
+    },
+  },
+);
+
+if (report.verdict !== "safe") console.error(report.issues);
+else console.log(report.plan.steps); // prepared only; never signed or sent
+```
+
+The default policy allows only Robinhood mainnet/testnet, requires RPC chain
+identity, simulation, gas, fee and balance evidence, blocks unlimited token and
+operator approvals, blocks EOA or unknown/unverified approval targets, and
+treats unknown actions as unknown. The approval-target checks can be relaxed
+only with the explicit `allowEoaApprovalTargets` or
+`allowUnverifiedApprovalTargets` policy flags.
+
+Custom decoders can describe verified DEX or bridge calls and their
+balance/allowance requirements. Their selector must match the calldata, their
+requirements are bounded and deduplicated, and swaps must declare both an input
+asset and a canonical `marketPair` whose base matches that input (native assets
+use `native:<chainId>`). Every Oracle, DEX, slippage, and
+price-impact observation for a market-sensitive action carries `source`,
+`chainId`, `blockNumber`, `observedAtSeconds`, `baseAsset`, and `quoteAsset`.
+Pair/chain mismatch, stale or future observations, and excessive timestamp or
+block skew fail closed. Selector decoding never proves contract identity.
+
+Reports are immutable evidence snapshots. A `safe` report contains one
+prepared transaction step; `blocked` and `unknown` reports always withhold all
+steps. The module has no signer, wallet, private-key, broadcast, or send API.
+
 ## Examples
 
 Runnable scripts in [`examples/`](examples/):
@@ -200,12 +276,23 @@ Runnable scripts in [`examples/`](examples/):
 - [`scan-pools.mts`](examples/scan-pools.mts) — V2/V3/V4 discovery from verified deployment addresses, with streaming and resume bounds
 - [`market-session.mts`](examples/market-session.mts) — report regular-session context without claiming oracle freshness
 - [`oracle-guard.mts`](examples/oracle-guard.mts) — read a live feed and fail closed on unknown sequencer or pause state
+- [`preflight-transaction.mts`](examples/preflight-transaction.mts) — simulate and risk-check a native transfer without a signer or send call
+- [`preflight-erc20-transfer.mts`](examples/preflight-erc20-transfer.mts) — decode and approve a safe ERC-20 transfer plan using deterministic evidence
+- [`preflight-approval-risk.mts`](examples/preflight-approval-risk.mts) — see an unlimited approval to an unverified spender fail closed
+- [`preflight-custom-swap.mts`](examples/preflight-custom-swap.mts) — bind a custom swap to balances, allowance, Oracle Guard, and market provenance
+
+The [transaction preflight examples guide](examples/README.md) provides the
+recommended learning order and expected verdict for each example.
 
 ```
 cd examples && npm i
 V2_FACTORIES=0x... V3_FACTORIES=0x... V4_POOL_MANAGERS=0x... npx tsx scan-pools.mts
 ETHEREUM_RPC_URL=https://your-rpc.example npx tsx watch-bridge.mts
 npx tsx oracle-guard.mts # defaults to unknown pause/sequencer state and fails closed
+FROM_ADDRESS=0x... TO_ADDRESS=0x... npx tsx preflight-transaction.mts
+npm run preflight:erc20
+npm run preflight:approval-risk
+npm run preflight:swap
 ```
 
 ## Notes

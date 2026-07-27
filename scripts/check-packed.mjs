@@ -33,7 +33,8 @@ try {
   );
 
   const assertion =
-    "if (m.CHAIN_ID !== 4663 || typeof m.assessOracleHealth !== 'function') " +
+    "if (m.CHAIN_ID !== 4663 || typeof m.assessOracleHealth !== 'function' " +
+    "|| typeof m.inspectTransaction !== 'function') " +
     "throw new Error('packed exports are incomplete')";
   run(
     process.execPath,

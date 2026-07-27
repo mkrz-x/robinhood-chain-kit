@@ -7,6 +7,7 @@ flowchart LR
     RPC["RPC + sequencer feed"]
     DEX["DEX pools\n(tokenized stocks, 24/7)"]
     ORACLE["Oracle Guard\n(feed + round + sequencer + pause)"]
+    FIREWALL["Transaction Firewall\n(simulation + identity + balances + policy)"]
   end
   APP["your app"]
   GW -- "DepositInitiated\n(capital in)" --> APP
@@ -15,3 +16,7 @@ flowchart LR
   RPC -- "robinhoodChain\n(viem-ready)" --> APP
   DEX -- "address-scoped events" --> APP
   ORACLE -- "assessOracleHealth()\nfail-closed diagnostics" --> APP
+  RPC -- "simulation + chain evidence" --> FIREWALL
+  DEX -- "quote + execution risk" --> FIREWALL
+  ORACLE -- "oracle health" --> FIREWALL
+  FIREWALL -- "inspectTransaction()\nready / blocked / unknown" --> APP

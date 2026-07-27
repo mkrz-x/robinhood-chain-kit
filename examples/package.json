@@ -4,7 +4,11 @@
   "type": "module",
   "description": "Runnable examples for robinhood-chain-kit. npm i && npx tsx <example>.mts",
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "preflight:erc20": "tsx preflight-erc20-transfer.mts",
+    "preflight:approval-risk": "tsx preflight-approval-risk.mts",
+    "preflight:swap": "tsx preflight-custom-swap.mts",
+    "preflight:live-native": "tsx preflight-transaction.mts"
   },
   "dependencies": {
     "robinhood-chain-kit": "file:..",

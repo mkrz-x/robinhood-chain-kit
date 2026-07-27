@@ -4,4 +4,5 @@ export * from "./dex.js";
 export * from "./feeds.js";
 export * from "./logs.js";
 export * from "./markethours.js";
+export * from "./preflight.js";
 export * from "./retryfetch.js";
