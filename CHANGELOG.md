@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0 — 2026-07-26
+
+- **Transaction Firewall**: added strict transaction normalization, conservative
+  native/ERC-20/operator action decoding, injected simulation and RPC evidence,
+  provider-chain checks, asset/contract/approval-target identity, exact gas and
+  balance accounting, and fail-closed `safe` / `blocked` / `unknown` verdicts.
+- **Market-aware planning**: integrates Oracle Guard, exact cross-decimal
+  oracle/DEX deviation, slippage, price-impact, and bounded custom DEX/bridge
+  decoders. Market observations are bound to an explicit pair, chain, block,
+  timestamp, and source; stale, skewed, or mismatched evidence fails closed.
+- **Independent execution caps**: caller gas limits and fee caps are compared
+  with independent estimates, empty-calldata targets are classified by
+  bytecode, and EOA or unknown/unverified approval targets are blocked unless
+  an explicit policy opts out.
+- **Immutable evidence**: adapter and caller inputs are cloned into deeply
+  frozen reports so later mutation cannot change a completed assessment.
+- **Guided examples**: added deterministic ERC-20 transfer, blocked approval,
+  and provenance-bound custom swap walkthroughs alongside the live RPC example.
+- **No execution authority**: the public surface prepares explainable plans but
+  contains no wallet, private-key, signer, broadcaster, or send API.
+
 ## 0.5.0 — 2026-07-26
 
 - **Oracle Guard**: added a strict Chainlink feed-directory loader and parser,
