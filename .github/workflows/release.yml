@@ -1,0 +1,142 @@
+name: release
+
+# Publishing is a tag push, not a button. `git push origin v0.6.0` is the whole
+# release ritual, and the tag is the only thing that can start one — a green CI
+# run on main never publishes by itself.
+#
+# Every gate below fails closed. A tag that disagrees with package.json, a
+# version already on the registry, a failing test, a CHANGELOG with nothing to
+# say about this version: each stops the run *before* `npm publish`, because the
+# one thing that cannot be undone here is publishing the wrong tarball.
+on:
+  push:
+    tags: ["v*"]
+
+# `provenance: true` in publishConfig needs an OIDC token, and that needs
+# `id-token: write` — a laptop cannot mint one, which is why publishing has to
+# live here. `contents: write` is for the GitHub Release at the end.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/robinhood-chain-kit
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # OIDC: trusted publishing + provenance attestation
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/package-lock.json
+
+      # Node 22 ships npm 10.x. Trusted publishing (OIDC, no NPM_TOKEN) landed
+      # in 11.5.1, and on an older npm the run would fall through to asking for
+      # a token that does not exist. Pin the floor rather than trust the image.
+      - name: use an npm that can publish over OIDC
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: read the release identity
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # A tag is a claim about which version this is. If it disagrees with
+      # package.json, one of the two is a mistake and we cannot tell which.
+      - name: tag must match package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} claims $tag, package.json says $VERSION"
+            exit 1
+          fi
+
+      # npm would reject a duplicate anyway, but only after prepack, tests and
+      # a tarball upload. Ask first: a re-pushed tag then fails in 3 seconds
+      # with a sentence that says what happened.
+      #
+      # `npm view <pkg>@<missing-version>` exits 0 with empty output, so the
+      # exit code proves nothing here — the output is the signal.
+      - name: version must not already be published
+        run: |
+          published="$(npm view "$NAME@$VERSION" version 2>/dev/null || true)"
+          if [ -n "$published" ]; then
+            echo "::error::$NAME@$VERSION is already on the registry — bump the version"
+            exit 1
+          fi
+
+      # The CHANGELOG is how a consumer finds out what changed. Shipping a
+      # version it has never heard of makes it worse than absent, because it
+      # now reads as complete when it is not.
+      - name: changelog must describe this version
+        run: |
+          notes="$(awk -v v="$VERSION" '
+            # dots in a semver are regex wildcards until escaped, and the
+            # trailing class stops 0.6.0 from matching a future 0.6.0-rc
+            BEGIN { gsub(/\./, "\\.", v); re = "^## " v "([^0-9.]|$)" }
+            $0 ~ re { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md)"
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            echo "::error::CHANGELOG.md has no '## $VERSION' section"
+            exit 1
+          fi
+          {
+            echo "NOTES<<CHANGELOG_EOF"
+            printf '%s\n' "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_ENV"
+
+      - run: npm ci
+      - run: npm ci --prefix examples
+
+      # ci.yml already ran this on main, but not on this commit — a tag can
+      # point anywhere. Types, build, 162 tests, publint, Are the Types Wrong,
+      # the packed ESM+CJS smoke test, and the examples type-check, against the
+      # exact tree about to be uploaded.
+      - name: verify
+        run: npm run verify
+
+      # No NODE_AUTH_TOKEN. Authentication is the OIDC token minted by
+      # `id-token: write` and exchanged with the registry, which also produces
+      # the provenance attestation `publishConfig.provenance` asks for.
+      #
+      # This requires a trusted publisher on npmjs.com — package settings →
+      # Trusted Publisher → GitHub Actions, with this repository and the
+      # workflow filename `release.yml`. Without it the registry has no reason
+      # to trust the token and rejects the publish.
+      #
+      # To use a granular access token instead, add the NPM_TOKEN secret and:
+      #   env:
+      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Provenance still works — it is the `id-token: write` above that earns
+      # it, not the auth method.
+      - name: publish to npm
+        run: npm publish
+
+      - name: github release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$NAME v$VERSION" \
+            --notes "$NOTES" \
+            --verify-tag
