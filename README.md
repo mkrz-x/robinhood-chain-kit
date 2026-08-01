@@ -216,20 +216,37 @@ between 1.33 and 1.67.
 **For a value you can put in a financial calculation, read the contract.**
 
 ```ts
-import { getErc8056ReadCalls, ERC8056_VERIFICATION } from "robinhood-chain-kit";
+import {
+  ERC8056_VERIFICATION,
+  getErc8056ReadCalls,
+  resolveScaledUiMultiplier,
+} from "robinhood-chain-kit";
 
-for (const call of getErc8056ReadCalls(stockToken)) {
-  call.functionName; // uiMultiplier | newUIMultiplier | effectiveAt
-  call.provenance;   // "draft-spec-unverified" — a revert means this
-                     // deployment does not expose it
-}
-ERC8056_VERIFICATION.TransferWithScaledUI; // "deployed-logs" — the only member
-                                           // confirmed against a real contract
+const [current, pending, effectiveAt] = await Promise.all(
+  getErc8056ReadCalls(stockToken).map((c) =>
+    client.readContract({ address: c.address, abi: c.abi, functionName: c.functionName }),
+  ),
+);
+
+resolveScaledUiMultiplier({ current, pending, effectiveAtSeconds: effectiveAt }, nowSeconds);
+// -> { status: "none" | "applied", multiplier }
+// -> { status: "pending", multiplier, pending, effectiveAtSeconds }  not live yet
+// -> { status: "due",     multiplier, pending, effectiveAtSeconds }  ambiguous
 ```
 
-`UIMULTIPLIER_UPDATED_EVENT` ships **without** a `topic0` constant. Publishing a
-hash for a signature nobody has confirmed against a deployed log would recreate
-the exact trap above, and a wrong `topic0` fails silently.
+**`newUIMultiplier()` is a scheduled value, not the current one.**
+`UIMultiplierUpdated` announces a change; one token on chain emitted the
+identical `(old, new, effectiveAt)` triple at two different blocks while `old`
+was still live. Reading the pending value as current prices a split before it
+happens. `status: "due"` is the state worth handling — the effective time has
+passed and the contract still reports the old value, so anything derived from
+either is ambiguous.
+
+Every ABI member is verified against live contracts on chain 4663, and
+`ERC8056_VERIFICATION` says how: `deployed-call` for the three reads,
+`deployed-logs` for both events. `UIMULTIPLIER_UPDATED_TOPIC0` ships only
+because it was earned — 0.7.0 withheld it, because a `topic0` nobody has
+confirmed fails silently and that is the trap this module exists for.
 
 ### Detect a corporate action without inventing one
 

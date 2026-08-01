@@ -28,6 +28,7 @@ import {
   estimateScaledUiMultiplier,
   formatScaledUiMultiplier,
   getErc8056ReadCalls,
+  resolveScaledUiMultiplier,
   robinhoodChain,
   type ScaledUiMultiplierEstimate,
 } from "robinhood-chain-kit";
@@ -86,10 +87,30 @@ if (latest?.estimated) {
 
 /**
  * For a multiplier you can put in a financial calculation, read the contract.
- * These members come from the draft spec and are unverified against deployed
- * bytecode, so a revert means this deployment does not expose them.
+ *
+ * `newUIMultiplier()` is a SCHEDULED value, not the current one — the update
+ * event announces a change and may be emitted more than once before it takes
+ * effect. `resolveScaledUiMultiplier` decides which applies and flags the one
+ * unsafe state: the effective time has passed and the contract has not moved.
  */
-console.log("\nauthoritative reads (call these instead of trusting the estimate):");
-for (const call of getErc8056ReadCalls(token)) {
-  console.log(`  ${call.functionName}()  [${call.provenance}]`);
+const calls = getErc8056ReadCalls(token);
+const [current, pending, effectiveAt] = (await Promise.all(
+  calls.map((call) =>
+    client.readContract({ address: call.address, abi: call.abi, functionName: call.functionName }),
+  ),
+)) as [bigint, bigint, bigint];
+
+const schedule = resolveScaledUiMultiplier(
+  { current, pending, effectiveAtSeconds: effectiveAt },
+  Math.floor(Date.now() / 1000),
+);
+console.log(`\nauthoritative : ${formatScaledUiMultiplier(schedule.multiplier)}`);
+console.log(`schedule      : ${schedule.status}`);
+if (schedule.status === "pending") {
+  console.log(`  a change to ${formatScaledUiMultiplier(schedule.pending)} is announced for ` +
+    `${new Date(schedule.effectiveAtSeconds * 1000).toISOString()}. it is NOT live yet.`);
+}
+if (schedule.status === "due") {
+  console.log("  the effective time has passed and the contract still reports the old value.");
+  console.log("  do not derive prices from either until this resolves.");
 }

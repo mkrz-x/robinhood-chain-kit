@@ -6,6 +6,8 @@ import {
   ERC8056_SPEC_TOPIC0,
   ERC8056_VERIFICATION,
   SCALED_UI_ONE,
+  UIMULTIPLIER_UPDATED_EVENT,
+  UIMULTIPLIER_UPDATED_TOPIC0,
   TRANSFER_WITH_SCALED_UI_EVENT,
   TRANSFER_WITH_SCALED_UI_TOPIC0,
   compareScaledUiEstimates,
@@ -18,6 +20,7 @@ import {
   inferUiSettlementPrice,
   pairDeliveryVersusPayment,
   readScaledUiMultiplier,
+  resolveScaledUiMultiplier,
   toRawAmount,
   toUiAmount,
   type SettlementLeg,
@@ -82,13 +85,36 @@ describe("the name trap", () => {
 });
 
 describe("the ABI says what it has actually seen", () => {
-  it("marks only the transfer event as observed on a deployed contract", () => {
-    // the rest is draft text. presenting it as verified would be the same
-    // mistake as the name trap, one layer up.
+  it("records how each member was verified against chain 4663", () => {
+    // the three reads answered eth_call on live stock tokens; both events were
+    // found in the beacon implementation's bytecode and then in emitted logs
     expect(ERC8056_VERIFICATION.TransferWithScaledUI).toBe("deployed-logs");
-    for (const member of ["uiMultiplier", "newUIMultiplier", "effectiveAt", "UIMultiplierUpdated"]) {
-      expect(ERC8056_VERIFICATION[member]).toBe("draft-spec-unverified");
+    expect(ERC8056_VERIFICATION.UIMultiplierUpdated).toBe("deployed-logs");
+    for (const member of ["uiMultiplier", "newUIMultiplier", "effectiveAt"]) {
+      expect(ERC8056_VERIFICATION[member]).toBe("deployed-call");
     }
+  });
+
+  it("the update signature hashes to the exported topic0", () => {
+    // published only once earned. 0.7.0 withheld it because an unverified
+    // topic0 fails silently, which is the trap this module warns about.
+    const signature = UIMULTIPLIER_UPDATED_EVENT.replace(
+      /^event (\w+)\((.*)\)$/,
+      (_, name: string, args: string) =>
+        `${name}(${args
+          .split(",")
+          .map((a) => a.trim().split(/\s+/)[0])
+          .join(",")})`,
+    );
+    expect(signature).toBe("UIMultiplierUpdated(uint256,uint256,uint256)");
+    expect(keccak256(toHex(signature))).toBe(UIMULTIPLIER_UPDATED_TOPIC0);
+  });
+
+  it("declares all three update parameters non-indexed, as the logs show", () => {
+    // every emission on chain carries exactly one topic and 96 bytes of data
+    const event = ERC8056_ABI.find((i) => i.name === "UIMultiplierUpdated")!;
+    expect(event.inputs.every((i) => i.indexed === false)).toBe(true);
+    expect(event.inputs).toHaveLength(3);
   });
 
   it("every ABI member has a verification entry", () => {
@@ -104,7 +130,7 @@ describe("the ABI says what it has actually seen", () => {
       "newUIMultiplier",
       "effectiveAt",
     ]);
-    expect(calls.every((c) => c.provenance === "draft-spec-unverified")).toBe(true);
+    expect(calls.every((c) => c.provenance === "deployed-call")).toBe(true);
   });
 
   it("rejects a malformed token address", () => {
@@ -470,5 +496,51 @@ describe("inferSettlementPrice (deprecated)", () => {
     expect(
       inferSettlementPrice({ settlement, stockDecimals: 18, cashDecimals: 6, priceDecimals: 2 }),
     ).toEqual({ inferred: true, price: "400.00", decimals: 2, stockAmountMode: "raw" });
+  });
+});
+
+describe("resolveScaledUiMultiplier — a schedule is not a state", () => {
+  const at = (current: bigint, pending: bigint, effectiveAtSeconds: number, now: number) =>
+    resolveScaledUiMultiplier({ current, pending, effectiveAtSeconds }, now);
+
+  it("reports no schedule when effectiveAt is zero", () => {
+    // what every unadjusted stock token on the chain reads today
+    expect(at(ONE, ONE, 0, 1_785_609_523)).toEqual({ status: "none", multiplier: ONE });
+  });
+
+  it("never returns the pending value as the current multiplier", () => {
+    // the failure this exists for: reading newUIMultiplier() as current prices
+    // a split before it happens
+    const resolved = at(ONE, 4n * ONE, 1_785_700_000, 1_785_609_523);
+    expect(resolved).toEqual({
+      status: "pending",
+      multiplier: ONE,
+      pending: 4n * ONE,
+      effectiveAtSeconds: 1_785_700_000,
+    });
+  });
+
+  it("calls a passed effective time with an unmoved contract `due`, not applied", () => {
+    // ambiguous state: the change should be live and the contract disagrees.
+    // anything derived from either value is unsafe until it resolves.
+    const resolved = at(ONE, 4n * ONE, 1_785_000_000, 1_785_609_523);
+    expect(resolved.status).toBe("due");
+    expect(resolved.multiplier).toBe(ONE);
+  });
+
+  it("reports applied once the contract itself has moved", () => {
+    // the live shape of all five tokens that have ever had a corporate action
+    expect(at(4n * ONE, 4n * ONE, 1_782_999_000, 1_785_609_523)).toEqual({
+      status: "applied",
+      multiplier: 4n * ONE,
+      effectiveAtSeconds: 1_782_999_000,
+    });
+  });
+
+  it("rejects malformed state instead of resolving it", () => {
+    expect(() => at(1 as unknown as bigint, ONE, 0, 0)).toThrow(TypeError);
+    expect(() => at(-1n, ONE, 0, 0)).toThrow(RangeError);
+    expect(() => at(ONE, ONE, -1, 0)).toThrow(RangeError);
+    expect(() => at(ONE, ONE, 0, Number.NaN)).toThrow(RangeError);
   });
 });

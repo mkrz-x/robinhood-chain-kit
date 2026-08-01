@@ -37,13 +37,24 @@ right. Minor rather than patch because two public behaviours change.
   basis that can be silently defaulted is one that will be silently wrong.
 - **`inferSettlementPrice` is deprecated**, unchanged in behaviour, and now
   documents that it prices per raw ERC-20 unit.
-- **ERC-8056 contract surface**: added `ERC8056_ABI`, `UIMULTIPLIER_UPDATED_EVENT`
-  and `getErc8056ReadCalls`, client-neutral and with no new runtime dependency.
-  `ERC8056_VERIFICATION` records, per member, whether it was confirmed against
-  deployed logs or taken from the draft text — only `TransferWithScaledUI` is
-  confirmed. **No topic0 is published for `UIMultiplierUpdated`**: shipping a
-  hash for a signature nobody has verified would recreate exactly the trap this
-  module warns about.
+- **ERC-8056 contract surface, verified against chain 4663**: added
+  `ERC8056_ABI`, `UIMULTIPLIER_UPDATED_EVENT`, `UIMULTIPLIER_UPDATED_TOPIC0` and
+  `getErc8056ReadCalls`, client-neutral and with no new runtime dependency.
+  Nothing here is taken from the draft text: `uiMultiplier()`,
+  `newUIMultiplier()` and `effectiveAt()` all answered `eth_call` on live stock
+  tokens, and both event topics were found in the beacon implementation's
+  bytecode and then in emitted logs. `ERC8056_VERIFICATION` records which kind
+  of evidence each member has. The spec's `TransferWithUIAmount` topic is
+  **absent** from that bytecode, so the name trap is now confirmed at the
+  bytecode level and not only from log filters.
+- **`UIMultiplierUpdated` announces a SCHEDULED change, not a completed one.**
+  One token emitted the identical `(old, new, effectiveAt)` triple at two
+  different blocks while `old` was still the live multiplier. Added
+  `resolveScaledUiMultiplier`, which never returns the pending value as
+  current and flags the one unsafe state — `status: "due"`, where the
+  effective time has passed and the contract still reports the old value.
+  All ten emissions on chain carry exactly one topic and 96 bytes of data,
+  confirming all three parameters are non-indexed as declared.
 - **Feed-directory integrity**: `loadChainlinkFeedDirectory` accepts an optional
   `expectedSha256`, hashed over the raw response bytes before parsing. Schema
   validation proves shape, not authorship — a hijacked mirror can serve a

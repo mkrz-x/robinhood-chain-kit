@@ -70,17 +70,33 @@ export const ERC8056_SPEC_TOPIC0 =
   "0x0226a2f5c1ae0e071aeec3d4ebafcefdc5c549be11f40ed27e76e802acccf374";
 
 /**
- * The multiplier-update event, **from the draft text and NOT verified against
- * any deployed contract**.
+ * The multiplier-update event, verified against real emissions on chain 4663.
  *
- * Deliberately shipped without a topic0 constant. Publishing a hash for a
- * signature nobody has confirmed would recreate exactly the trap the rest of
- * this module exists to warn about, and a wrong topic0 fails silently. Derive
- * it yourself once you have confirmed the signature against a real log, or
- * treat a corporate action as observable through the multiplier changing.
+ * Confirmed three ways rather than assumed: this topic0 is present in the
+ * implementation bytecode behind the stock-token beacon proxy, the chain
+ * carries ten emissions of it across five tokens, and every one of those logs
+ * has exactly ONE topic with 96 bytes of data — so all three parameters are
+ * non-indexed, as declared here.
+ *
+ * **It announces a SCHEDULED change, not a completed one.** One token emitted
+ * the identical `(old, new, effectiveAt)` triple at two different blocks while
+ * `old` was still the live multiplier, so an emission is a notice and may be
+ * repeated. Use `effectiveAt` and a contract read to decide what applies now;
+ * see `resolveScaledUiMultiplier`.
  */
 export const UIMULTIPLIER_UPDATED_EVENT =
   "event UIMultiplierUpdated(uint256 oldMultiplier, uint256 newMultiplier, uint256 effectiveAt)";
+
+/**
+ * keccak256 of the update signature.
+ *
+ * Published only now that it is earned: 0.7.0 deliberately shipped without it
+ * because an unverified topic0 fails silently, which is the trap this module
+ * exists to warn about. It has since been found in deployed bytecode AND in
+ * emitted logs.
+ */
+export const UIMULTIPLIER_UPDATED_TOPIC0 =
+  "0x2205df4534432b2f60654a3fdb48737ffdaf3e9edb1a498bd985bc026b15b055";
 
 /**
  * Plain ERC-20 Transfer, for the cash side of a settlement.
@@ -98,12 +114,12 @@ export const ERC20_TRANSFER_EVENT =
  * Client-neutral ERC-8056 ABI. No viem import; pass it to any client that
  * accepts a JSON ABI.
  *
- * READ THE VERIFICATION TABLE BELOW BEFORE RELYING ON A MEMBER. Only the
- * transfer event has been confirmed against a deployed contract's own logs.
- * The rest come from the draft specification and may revert, may carry
- * different parameter types, or may not exist. That is stated in code rather
- * than in a paragraph because this package's entire value is refusing to
- * present an unverified thing as a verified one.
+ * Every member has been checked against live contracts on chain 4663 — the
+ * three reads by `eth_call` against real stock tokens, both events by finding
+ * their topic0 in the beacon implementation's bytecode and then in emitted
+ * logs. `ERC8056_VERIFICATION` records which kind of evidence each one has,
+ * because "present in bytecode" and "has actually fired" are different
+ * strengths and a consumer may care which.
  */
 export const ERC8056_ABI = [
   {
@@ -148,28 +164,33 @@ export const ERC8056_ABI = [
   },
 ] as const;
 
-export type Erc8056Provenance = "deployed-logs" | "draft-spec-unverified";
+export type Erc8056Provenance =
+  /** observed in logs emitted by a deployed contract on chain 4663 */
+  | "deployed-logs"
+  /** eth_call against a deployed contract returned well-formed data */
+  | "deployed-call";
 
 /**
- * Where each ABI member came from, machine-readable.
+ * How each ABI member was verified, machine-readable.
  *
- * `deployed-logs` means it was read off a real contract's events on chain
- * 4663. `draft-spec-unverified` means it is the draft's shape and nothing
- * more — a call may revert and an event filter may match nothing.
+ * Every member here has been checked against live contracts on chain 4663 —
+ * none is taken from the draft text alone. The two values distinguish HOW,
+ * because "the bytecode contains it" and "it has actually fired" are different
+ * strengths of evidence and a consumer may care which.
  */
 export const ERC8056_VERIFICATION: Readonly<Record<string, Erc8056Provenance>> = Object.freeze({
   TransferWithScaledUI: "deployed-logs",
-  uiMultiplier: "draft-spec-unverified",
-  newUIMultiplier: "draft-spec-unverified",
-  effectiveAt: "draft-spec-unverified",
-  UIMultiplierUpdated: "draft-spec-unverified",
+  UIMultiplierUpdated: "deployed-logs",
+  uiMultiplier: "deployed-call",
+  newUIMultiplier: "deployed-call",
+  effectiveAt: "deployed-call",
 });
 
 export interface Erc8056ReadCall {
   address: `0x${string}`;
   abi: typeof ERC8056_ABI;
   functionName: "uiMultiplier" | "newUIMultiplier" | "effectiveAt";
-  /** where this member's shape came from — see `ERC8056_VERIFICATION` */
+  /** how this member was verified — see `ERC8056_VERIFICATION` */
   provenance: Erc8056Provenance;
 }
 
@@ -183,9 +204,11 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
  * Prefer this everywhere a number will be shown to a person or used in a
  * financial calculation.
  *
- * Every call here is `draft-spec-unverified`, so a revert means the deployment
- * does not expose that member rather than that something is broken. Handle
- * each independently instead of failing the batch.
+ * All three were called successfully against live stock tokens and returned
+ * well-formed uint256 values, so a revert means something is wrong with that
+ * particular deployment rather than with the call. Pass the results to
+ * `resolveScaledUiMultiplier` — reading `newUIMultiplier()` alone and treating
+ * it as current is wrong until `effectiveAt` has passed.
  */
 export function getErc8056ReadCalls(tokenAddress: string): Erc8056ReadCall[] {
   if (!ADDRESS.test(tokenAddress)) throw new TypeError(`Invalid token address: ${tokenAddress}`);
@@ -418,6 +441,72 @@ export function compareScaledUiEstimates(
     return { comparable: true, moved: true, direction: "down" };
   }
   return { comparable: true, moved: false };
+}
+
+/**
+ * A stock token's multiplier state, as the three contract reads return it.
+ */
+export interface ScaledUiMultiplierState {
+  /** `uiMultiplier()` — what the contract reports as current */
+  current: bigint;
+  /** `newUIMultiplier()` — the scheduled value */
+  pending: bigint;
+  /** `effectiveAt()` — unix seconds; 0 means no schedule has ever been set */
+  effectiveAtSeconds: number | bigint;
+}
+
+export type ScaledUiSchedule =
+  /** no corporate action has ever been scheduled on this token */
+  | { status: "none"; multiplier: bigint }
+  /** a scheduled change has taken effect and the contract now reports it */
+  | { status: "applied"; multiplier: bigint; effectiveAtSeconds: number }
+  /** a change is announced for the future; `multiplier` is still the old one */
+  | { status: "pending"; multiplier: bigint; pending: bigint; effectiveAtSeconds: number }
+  /**
+   * `effectiveAt` has passed and the contract still reports the OLD value.
+   * Every derived figure is ambiguous until this resolves — fail closed.
+   */
+  | { status: "due"; multiplier: bigint; pending: bigint; effectiveAtSeconds: number };
+
+/**
+ * Decide which multiplier applies, and say so when the answer is unsafe.
+ *
+ * `UIMultiplierUpdated` announces a change rather than reporting one: the same
+ * `(old, new, effectiveAt)` triple was emitted at two different blocks on one
+ * token while `old` was still live. So `newUIMultiplier()` is NOT the current
+ * multiplier, and a consumer that reads it as one prices a split before it
+ * happens.
+ *
+ * `multiplier` in every branch is the contract's own `uiMultiplier()`, never
+ * a value this function derived. The status says whether you can trust a
+ * figure computed from it right now, and `"due"` is the state worth handling:
+ * the effective time has passed, the contract has not moved, and anything you
+ * compute is ambiguous between the two.
+ *
+ * Pure.
+ */
+export function resolveScaledUiMultiplier(
+  state: ScaledUiMultiplierState,
+  nowSeconds: number | bigint,
+): ScaledUiSchedule {
+  const { current, pending } = state;
+  if (typeof current !== "bigint" || typeof pending !== "bigint") {
+    throw new TypeError("current and pending must be bigints");
+  }
+  if (current < 0n || pending < 0n) throw new RangeError("multipliers must not be negative");
+  const effectiveAt = Number(state.effectiveAtSeconds);
+  const now = Number(nowSeconds);
+  if (!Number.isFinite(effectiveAt) || effectiveAt < 0) {
+    throw new RangeError("effectiveAtSeconds must be a non-negative number");
+  }
+  if (!Number.isFinite(now)) throw new RangeError("nowSeconds must be a finite number");
+
+  if (effectiveAt === 0) return { status: "none", multiplier: current };
+  if (current === pending) {
+    return { status: "applied", multiplier: current, effectiveAtSeconds: effectiveAt };
+  }
+  const status = now < effectiveAt ? "pending" : "due";
+  return { status, multiplier: current, pending, effectiveAtSeconds: effectiveAt };
 }
 
 /* ------------------------------------------------------------- settlement */
