@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 — 2026-08-01
 
 - **Release process: CI attests, it no longer publishes.** Two attempts to
   publish over OIDC were rejected with a 404 on the PUT while provenance signed
@@ -15,6 +15,15 @@
   CI it made every hand publish fail with `EUSAGE`, and no released version has
   ever carried an attestation. The workflow header documents exactly how to
   restore CI publishing if the trusted publisher is ever configured.
+- **`npm run release` refuses in under a second instead of after thirty.**
+  `scripts/preflight-release.mjs` checks the three cheap things first: the
+  version is not already on the registry, the working tree is clean, and the
+  CHANGELOG has a section for this version. The working-tree check is the one
+  that matters — publishing is irreversible and npm does not allow replacing a
+  version, so the tag workflow's checksum comparison can only report a bad
+  publish after it is already public. This prevents it.
+- No consumer-facing code changed in this release; it is release tooling and
+  the README section describing it.
 
 ## 0.8.0 — 2026-08-01
 
