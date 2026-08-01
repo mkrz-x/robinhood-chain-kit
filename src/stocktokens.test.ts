@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { keccak256, toHex } from "viem";
 import {
+  ERC8056_ABI,
   ERC8056_SPEC_EVENT_NAME,
   ERC8056_SPEC_TOPIC0,
+  ERC8056_VERIFICATION,
   SCALED_UI_ONE,
   TRANSFER_WITH_SCALED_UI_EVENT,
   TRANSFER_WITH_SCALED_UI_TOPIC0,
+  compareScaledUiEstimates,
   compareScaledUiMultiplier,
+  estimateScaledUiMultiplier,
   formatScaledUiMultiplier,
+  getErc8056ReadCalls,
+  inferRawSettlementPrice,
   inferSettlementPrice,
+  inferUiSettlementPrice,
   pairDeliveryVersusPayment,
   readScaledUiMultiplier,
   toRawAmount,
@@ -22,19 +29,37 @@ const CAROL = "0xcccc000000000000000000000000000000000003";
 const TSLA = "0x1111111111111111111111111111111111111111";
 const USDG = "0x2222222222222222222222222222222222222222";
 
+const ONE = SCALED_UI_ONE;
+
+/**
+ * What the contract does before anyone sees the event.
+ *
+ * Tests generate observations through this rather than hand-writing a
+ * `uiValue`, so the truncation under test is the real one.
+ */
+const emit = (rawValue: bigint, multiplier: bigint) => ({
+  value: rawValue,
+  uiValue: (rawValue * multiplier) / ONE,
+});
+
 const leg = (over: Partial<SettlementLeg> = {}): SettlementLeg => ({
   transactionHash: "0xtx1",
   token: TSLA,
   from: ALICE,
   to: BOB,
-  value: 10n ** 18n,
+  value: ONE,
   ...over,
 });
 
+/** one share of an 18-decimal stock token against 400 USDG at 6 decimals */
+const tradeOf = (stockRaw: bigint, cashUnits: bigint) =>
+  pairDeliveryVersusPayment({
+    stockLegs: [leg({ value: stockRaw })],
+    cashLegs: [leg({ token: USDG, from: BOB, to: ALICE, value: cashUnits })],
+  })[0]!;
+
 describe("the name trap", () => {
   it("the deployed signature hashes to the exported topic0", () => {
-    // the constant is load-bearing: it is the one thing a consumer cannot
-    // derive from the EIP, so it is derived here instead of trusted
     const signature = TRANSFER_WITH_SCALED_UI_EVENT.replace(
       /^event (\w+)\((.*)\)$/,
       (_, name: string, args: string) =>
@@ -48,9 +73,6 @@ describe("the name trap", () => {
   });
 
   it("the spec's name hashes to something else entirely", () => {
-    // this is the whole reason the module exists. a filter built from
-    // EIP-8056's text matches zero logs, forever, and looks like a chain with
-    // no tokenized-equity activity rather than like a bug.
     const specTopic = keccak256(
       toHex(`${ERC8056_SPEC_EVENT_NAME}(address,address,uint256,uint256)`),
     );
@@ -59,91 +81,240 @@ describe("the name trap", () => {
   });
 });
 
-describe("readScaledUiMultiplier", () => {
-  it("recovers an unadjusted multiplier exactly", () => {
-    const r = readScaledUiMultiplier({ value: 5n * SCALED_UI_ONE, uiValue: 5n * SCALED_UI_ONE });
-    expect(r).toEqual({ known: true, multiplier: SCALED_UI_ONE });
+describe("the ABI says what it has actually seen", () => {
+  it("marks only the transfer event as observed on a deployed contract", () => {
+    // the rest is draft text. presenting it as verified would be the same
+    // mistake as the name trap, one layer up.
+    expect(ERC8056_VERIFICATION.TransferWithScaledUI).toBe("deployed-logs");
+    for (const member of ["uiMultiplier", "newUIMultiplier", "effectiveAt", "UIMultiplierUpdated"]) {
+      expect(ERC8056_VERIFICATION[member]).toBe("draft-spec-unverified");
+    }
   });
 
-  it("recovers a four-for-one split", () => {
-    const r = readScaledUiMultiplier({ value: 10n ** 18n, uiValue: 4n * 10n ** 18n });
-    expect(r.known && formatScaledUiMultiplier(r.multiplier)).toBe("4.000000000000000000");
+  it("every ABI member has a verification entry", () => {
+    for (const item of ERC8056_ABI) {
+      expect(ERC8056_VERIFICATION[item.name]).toBeDefined();
+    }
   });
 
-  it("says unknown rather than guessing when the raw value is zero", () => {
-    // uiValue/0 is undefined, not enormous, and "we cannot tell" must not
-    // collapse into "the multiplier is 1"
-    expect(readScaledUiMultiplier({ value: 0n, uiValue: 10n })).toEqual({
-      known: false,
+  it("builds authoritative read calls and carries their provenance", () => {
+    const calls = getErc8056ReadCalls(TSLA);
+    expect(calls.map((c) => c.functionName)).toEqual([
+      "uiMultiplier",
+      "newUIMultiplier",
+      "effectiveAt",
+    ]);
+    expect(calls.every((c) => c.provenance === "draft-spec-unverified")).toBe(true);
+  });
+
+  it("rejects a malformed token address", () => {
+    expect(() => getErc8056ReadCalls("0xdead")).toThrow(TypeError);
+  });
+});
+
+describe("a multiplier recovered from one transfer is an estimate", () => {
+  it("cannot recover 1.5 from a three-unit transfer, and says so with bounds", () => {
+    // the contract computes floor(3 * 1.5) = 4 and emits that. dividing back
+    // gives 1.333…, which is not the multiplier and never was.
+    const observation = emit(3n, (15n * ONE) / 10n);
+    expect(observation.uiValue).toBe(4n);
+
+    const estimate = estimateScaledUiMultiplier(observation);
+    expect(estimate.estimated).toBe(true);
+    if (!estimate.estimated) return;
+    expect(estimate.lowerBound).toBe(1_333_333_333_333_333_334n);
+    expect(estimate.upperBoundExclusive).toBe(1_666_666_666_666_666_667n);
+    // the true multiplier is inside the range, which is the guarantee
+    expect(estimate.lowerBound <= (15n * ONE) / 10n).toBe(true);
+    expect((15n * ONE) / 10n < estimate.upperBoundExclusive).toBe(true);
+  });
+
+  it("a one-unit transfer bounds almost nothing", () => {
+    const estimate = estimateScaledUiMultiplier(emit(1n, (15n * ONE) / 10n));
+    expect(estimate.estimated).toBe(true);
+    if (!estimate.estimated) return;
+    // anything from 1x to just under 2x could have produced this
+    expect(estimate.lowerBound).toBe(ONE);
+    expect(estimate.upperBoundExclusive).toBe(2n * ONE);
+  });
+
+  it("a whole-token transfer pins the multiplier exactly", () => {
+    const estimate = estimateScaledUiMultiplier(emit(ONE, 4n * ONE));
+    expect(estimate.estimated).toBe(true);
+    if (!estimate.estimated) return;
+    expect(estimate.multiplier).toBe(4n * ONE);
+    // width 1: exactly one multiplier is consistent with the observation
+    expect(estimate.upperBoundExclusive - estimate.lowerBound).toBe(1n);
+  });
+
+  it("two transfers under ONE unchanged multiplier give different point estimates", () => {
+    const trueMultiplier = (12n * ONE) / 10n;
+    const small = estimateScaledUiMultiplier(emit(3n, trueMultiplier));
+    const larger = estimateScaledUiMultiplier(emit(7n, trueMultiplier));
+    expect(small.estimated && larger.estimated).toBe(true);
+    if (!small.estimated || !larger.estimated) return;
+    // this disagreement is arithmetic, not a corporate action
+    expect(small.multiplier).toBe(1_166_666_666_666_666_666n);
+    expect(larger.multiplier).toBe(1_214_285_714_285_714_286n);
+    expect(small.multiplier).not.toBe(larger.multiplier);
+    // and both ranges contain the truth
+    for (const e of [small, larger]) {
+      expect(e.lowerBound <= trueMultiplier && trueMultiplier < e.upperBoundExclusive).toBe(true);
+    }
+  });
+
+  it("the point estimate always lies inside its own bounds", () => {
+    for (let raw = 1n; raw <= 64n; raw += 1n) {
+      for (const m of [ONE, (15n * ONE) / 10n, (12n * ONE) / 10n, 4n * ONE, ONE / 4n]) {
+        const observation = emit(raw, m);
+        if (observation.uiValue === 0n) continue;
+        const e = estimateScaledUiMultiplier(observation);
+        expect(e.estimated).toBe(true);
+        if (!e.estimated) continue;
+        expect(e.lowerBound <= e.multiplier).toBe(true);
+        expect(e.multiplier < e.upperBoundExclusive).toBe(true);
+        // and the truth is bounded, which is the only claim this makes
+        expect(e.lowerBound <= m && m < e.upperBoundExclusive).toBe(true);
+      }
+    }
+  });
+
+  it("fails closed on amounts that cannot bound anything", () => {
+    expect(estimateScaledUiMultiplier({ value: 0n, uiValue: 10n })).toEqual({
+      estimated: false,
       reason: "zero-raw-value",
     });
-  });
-
-  it("rejects a zero display amount against real units", () => {
-    expect(readScaledUiMultiplier({ value: 10n, uiValue: 0n })).toEqual({
-      known: false,
+    expect(estimateScaledUiMultiplier({ value: 10n, uiValue: 0n })).toEqual({
+      estimated: false,
       reason: "zero-ui-value",
     });
-  });
-
-  it("treats a negative amount as a decode failure, not a value", () => {
-    expect(readScaledUiMultiplier({ value: -1n, uiValue: 1n })).toEqual({
-      known: false,
+    expect(estimateScaledUiMultiplier({ value: -1n, uiValue: 1n })).toEqual({
+      estimated: false,
+      reason: "negative-amount",
+    });
+    expect(estimateScaledUiMultiplier({ value: 1n, uiValue: -1n })).toEqual({
+      estimated: false,
       reason: "negative-amount",
     });
   });
 
   it("throws on a float, rather than silently losing precision", () => {
-    expect(() =>
-      readScaledUiMultiplier({ value: 1 as unknown as bigint, uiValue: 1n }),
-    ).toThrow(TypeError);
+    expect(() => estimateScaledUiMultiplier({ value: 1 as unknown as bigint, uiValue: 1n })).toThrow(
+      TypeError,
+    );
+  });
+});
+
+describe("readScaledUiMultiplier (deprecated)", () => {
+  it("still returns the 0.7.0 shape so callers keep compiling", () => {
+    expect(readScaledUiMultiplier(emit(ONE, 4n * ONE))).toEqual({
+      known: true,
+      multiplier: 4n * ONE,
+    });
+    expect(readScaledUiMultiplier({ value: 0n, uiValue: 1n })).toEqual({
+      known: false,
+      reason: "zero-raw-value",
+    });
+  });
+
+  it("no longer returns a value outside the feasible range", () => {
+    // 0.7.0 divided with floor: 4e18/3 = 1333333333333333333, one below the
+    // smallest multiplier that could have produced the observation
+    const result = readScaledUiMultiplier(emit(3n, (15n * ONE) / 10n));
+    expect(result.known && result.multiplier).toBe(15n * ONE / 10n);
+    expect(result.known && result.multiplier >= 1_333_333_333_333_333_334n).toBe(true);
   });
 });
 
 describe("applying the multiplier", () => {
   it("scales raw units to the displayed amount", () => {
-    expect(toUiAmount(3n * SCALED_UI_ONE, 2n * SCALED_UI_ONE)).toBe(6n * SCALED_UI_ONE);
+    expect(toUiAmount(3n * ONE, 2n * ONE)).toBe(6n * ONE);
   });
 
   it("inverts, and refuses to divide by a zero multiplier", () => {
-    expect(toRawAmount(6n * SCALED_UI_ONE, 2n * SCALED_UI_ONE)).toBe(3n * SCALED_UI_ONE);
+    expect(toRawAmount(6n * ONE, 2n * ONE)).toBe(3n * ONE);
     expect(() => toRawAmount(1n, 0n)).toThrow(RangeError);
   });
 
   it("keeps a uint256-scale figure exact", () => {
-    // the reason multipliers are bigint: this value cannot survive a float
     const raw = 123_456_789_123_456_789n;
-    expect(toUiAmount(raw, SCALED_UI_ONE)).toBe(raw);
+    expect(toUiAmount(raw, ONE)).toBe(raw);
   });
 });
 
-describe("compareScaledUiMultiplier", () => {
+describe("compareScaledUiMultiplier — authoritative readings only", () => {
   it("reports direction and refuses to name the cause", () => {
-    const change = compareScaledUiMultiplier(SCALED_UI_ONE, 4n * SCALED_UI_ONE);
-    // a split and a dividend adjustment both move it up, and the event carries
-    // nothing that separates them
-    expect(change).toEqual({
+    expect(compareScaledUiMultiplier(ONE, 4n * ONE)).toEqual({
       moved: true,
       direction: "up",
-      previous: SCALED_UI_ONE,
-      current: 4n * SCALED_UI_ONE,
+      previous: ONE,
+      current: 4n * ONE,
     });
   });
 
-  it("calls a division wobble no movement", () => {
-    // the multiplier is recovered by dividing, so two transfers under one
-    // corporate-action state can differ in the last unit
-    expect(compareScaledUiMultiplier(SCALED_UI_ONE, SCALED_UI_ONE + 1n)).toEqual({ moved: false });
-  });
-
-  it("catches a move just past the tolerance", () => {
-    const current = SCALED_UI_ONE + SCALED_UI_ONE / 5_000n;
-    expect(compareScaledUiMultiplier(SCALED_UI_ONE, current).moved).toBe(true);
-  });
-
   it("reports a reverse move as down", () => {
-    const change = compareScaledUiMultiplier(4n * SCALED_UI_ONE, SCALED_UI_ONE);
+    const change = compareScaledUiMultiplier(4n * ONE, ONE);
     expect(change.moved && change.direction).toBe("down");
+  });
+
+  it("no longer hides a small real adjustment behind a default tolerance", () => {
+    // 0.7.0 defaulted toleranceBps to 1 to absorb estimate noise. an
+    // authoritative reading has no noise, and a dead band here would swallow a
+    // genuine corporate action.
+    expect(compareScaledUiMultiplier(ONE, ONE + 1n).moved).toBe(true);
+  });
+
+  it("still offers an explicit dead band for callers who want one", () => {
+    expect(compareScaledUiMultiplier(ONE, ONE + 1n, { toleranceBps: 1 }).moved).toBe(false);
+  });
+
+  it("rejects a negative tolerance", () => {
+    expect(() => compareScaledUiMultiplier(ONE, ONE, { toleranceBps: -1 })).toThrow(RangeError);
+  });
+});
+
+describe("compareScaledUiEstimates — proof, not signal", () => {
+  it("does NOT claim a corporate action from overlapping ranges", () => {
+    // the regression this function exists for: two differently sized transfers
+    // under one unchanged multiplier
+    const trueMultiplier = (12n * ONE) / 10n;
+    const comparison = compareScaledUiEstimates(
+      estimateScaledUiMultiplier(emit(3n, trueMultiplier)),
+      estimateScaledUiMultiplier(emit(7n, trueMultiplier)),
+    );
+    expect(comparison).toEqual({ comparable: true, moved: false });
+  });
+
+  it("reports a move only when no single multiplier explains both", () => {
+    const before = estimateScaledUiMultiplier(emit(ONE, ONE));
+    const after = estimateScaledUiMultiplier(emit(ONE, 4n * ONE));
+    expect(compareScaledUiEstimates(before, after)).toEqual({
+      comparable: true,
+      moved: true,
+      direction: "up",
+    });
+    expect(compareScaledUiEstimates(after, before)).toEqual({
+      comparable: true,
+      moved: true,
+      direction: "down",
+    });
+  });
+
+  it("a real change hidden inside two wide ranges is reported as unproven", () => {
+    // honest limitation: one-unit transfers bound almost nothing, so 1.5x to
+    // 1.9x is invisible here. the answer is a contract read, not a louder guess.
+    const before = estimateScaledUiMultiplier(emit(1n, (15n * ONE) / 10n));
+    const after = estimateScaledUiMultiplier(emit(1n, (19n * ONE) / 10n));
+    expect(compareScaledUiEstimates(before, after)).toEqual({ comparable: true, moved: false });
+  });
+
+  it("passes an unusable observation through as not comparable", () => {
+    expect(
+      compareScaledUiEstimates(
+        estimateScaledUiMultiplier({ value: 0n, uiValue: 1n }),
+        estimateScaledUiMultiplier(emit(ONE, ONE)),
+      ),
+    ).toEqual({ comparable: false, reason: "zero-raw-value" });
   });
 });
 
@@ -163,20 +334,16 @@ describe("pairDeliveryVersusPayment", () => {
   });
 
   it("refuses two transfers that merely share a transaction", () => {
-    // cash going to a third party is not payment for this delivery
     const unrelated = leg({ token: USDG, from: BOB, to: CAROL, value: 1n });
     expect(pairDeliveryVersusPayment({ stockLegs: [stock], cashLegs: [unrelated] })).toEqual([]);
   });
 
   it("leaves a batched transaction unclassified rather than guessing", () => {
     const second = leg({ from: CAROL, to: BOB });
-    expect(
-      pairDeliveryVersusPayment({ stockLegs: [stock, second], cashLegs: [cash] }),
-    ).toEqual([]);
+    expect(pairDeliveryVersusPayment({ stockLegs: [stock, second], cashLegs: [cash] })).toEqual([]);
   });
 
   it("ignores a stock transfer with no cash leg at all", () => {
-    // an ordinary wallet-to-wallet move is not a trade
     expect(pairDeliveryVersusPayment({ stockLegs: [stock], cashLegs: [] })).toEqual([]);
   });
 
@@ -203,35 +370,105 @@ describe("pairDeliveryVersusPayment", () => {
   });
 });
 
-describe("inferSettlementPrice", () => {
-  const settlement = pairDeliveryVersusPayment({
-    stockLegs: [leg({ value: 2n * 10n ** 18n })],
-    cashLegs: [leg({ token: USDG, from: BOB, to: ALICE, value: 800n * 10n ** 6n })],
-  })[0]!;
+describe("settlement pricing states its unit", () => {
+  // one raw share of an 18-decimal token against 400 USDG at 6 decimals
+  const settlement = tradeOf(ONE, 400n * 10n ** 6n);
+  const scales = { stockDecimals: 18, cashDecimals: 6, priceDecimals: 2 } as const;
+
+  it("prices per raw unit and says so", () => {
+    expect(inferRawSettlementPrice({ settlement, ...scales })).toEqual({
+      inferred: true,
+      price: "400.00",
+      decimals: 2,
+      stockAmountMode: "raw",
+    });
+  });
+
+  it("four-for-one split: raw 400, displayed 100", () => {
+    // one raw unit under a 4x multiplier is four displayed shares, so the
+    // person reading "per share" wants a quarter of the raw price
+    const ui = inferUiSettlementPrice({ settlement, ...scales, stockMultiplier: 4n * ONE });
+    expect(ui).toEqual({ inferred: true, price: "100.00", decimals: 2, stockAmountMode: "ui" });
+    const raw = inferRawSettlementPrice({ settlement, ...scales });
+    expect(raw.inferred && raw.price).toBe("400.00");
+  });
+
+  it("reverse split: fewer displayed shares means a higher displayed price", () => {
+    const ui = inferUiSettlementPrice({ settlement, ...scales, stockMultiplier: ONE / 4n });
+    expect(ui.inferred && ui.price).toBe("1600.00");
+  });
+
+  it("takes the contract's own uiValue in preference to a multiplier", () => {
+    const fromLog = inferUiSettlementPrice({ settlement, ...scales, stockUiValue: 4n * ONE });
+    const fromMultiplier = inferUiSettlementPrice({
+      settlement,
+      ...scales,
+      stockMultiplier: 4n * ONE,
+    });
+    expect(fromLog).toEqual(fromMultiplier);
+  });
 
   it("divides across differing decimals exactly", () => {
-    const price = inferSettlementPrice({
-      settlement,
-      stockDecimals: 18,
-      cashDecimals: 6,
-      priceDecimals: 2,
-    });
-    expect(price).toEqual({ inferred: true, price: "400.00", decimals: 2 });
+    // stock 18, cash 6: two shares against 800 USDG
+    const two = tradeOf(2n * ONE, 800n * 10n ** 6n);
+    expect(inferRawSettlementPrice({ settlement: two, ...scales }).inferred).toBe(true);
+    expect(
+      (inferRawSettlementPrice({ settlement: two, ...scales }) as { price: string }).price,
+    ).toBe("400.00");
   });
 
   it("carries `inferred` in the result, because nobody quoted this", () => {
-    const price = inferSettlementPrice({
-      settlement,
-      stockDecimals: 18,
-      cashDecimals: 6,
-      priceDecimals: 18,
-    });
-    expect(price.inferred).toBe(true);
+    expect(inferRawSettlementPrice({ settlement, stockDecimals: 18, cashDecimals: 6 }).inferred).toBe(
+      true,
+    );
   });
 
-  it("rejects an impossible decimals argument instead of returning a number", () => {
+  it("refuses a pricing basis it would have to guess", () => {
+    // both, or neither, is a call site that has not decided what it is asking
     expect(() =>
-      inferSettlementPrice({ settlement, stockDecimals: 18, cashDecimals: -1 }),
+      inferUiSettlementPrice({
+        settlement,
+        ...scales,
+        stockUiValue: ONE,
+        stockMultiplier: ONE,
+      } as never),
+    ).toThrow(TypeError);
+    expect(() => inferUiSettlementPrice({ settlement, ...scales } as never)).toThrow(TypeError);
+  });
+
+  it("fails closed when the multiplier scales the position to nothing", () => {
+    const tiny = tradeOf(1n, 400n * 10n ** 6n);
+    expect(inferUiSettlementPrice({ settlement: tiny, ...scales, stockMultiplier: 1n })).toEqual({
+      inferred: false,
+      reason: "zero-ui-stock-amount",
+    });
+  });
+
+  it("rejects zero, negative and out-of-range inputs", () => {
+    expect(() =>
+      inferRawSettlementPrice({ settlement, stockDecimals: 18, cashDecimals: -1 }),
     ).toThrow(RangeError);
+    expect(() =>
+      inferRawSettlementPrice({ settlement, stockDecimals: 256, cashDecimals: 6 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      inferUiSettlementPrice({ settlement, ...scales, stockMultiplier: 0n }),
+    ).toThrow(RangeError);
+    expect(() =>
+      inferUiSettlementPrice({ settlement, ...scales, stockUiValue: -1n }),
+    ).toThrow(RangeError);
+    expect(
+      inferUiSettlementPrice({ settlement, ...scales, stockUiValue: 0n }),
+    ).toEqual({ inferred: false, reason: "zero-ui-stock-amount" });
+  });
+});
+
+describe("inferSettlementPrice (deprecated)", () => {
+  const settlement = tradeOf(ONE, 400n * 10n ** 6n);
+
+  it("keeps 0.7.0 behaviour and now names the unit it was always using", () => {
+    expect(
+      inferSettlementPrice({ settlement, stockDecimals: 18, cashDecimals: 6, priceDecimals: 2 }),
+    ).toEqual({ inferred: true, price: "400.00", decimals: 2, stockAmountMode: "raw" });
   });
 });

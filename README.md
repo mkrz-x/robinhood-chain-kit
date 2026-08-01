@@ -35,6 +35,13 @@ L2, and the one that costs the most to learn the hard way: tokenized equities
 adjust through an **ERC-8056 scaled-UI multiplier** rather than by minting, and
 the deployed contracts do not use the event name the EIP specifies.
 
+Three distinctions run through that module, because collapsing any of them
+produces a financial figure that is wrong and looks right: a **raw** ERC-20
+amount is not a **displayed** share count; a multiplier **estimated** from a
+transfer is not the **authoritative** one on the contract; and the ERC-8056
+draft is not the deployed behaviour. Where the specification and a deployment
+disagree, this package follows the deployment and says which is which.
+
 ## What's inside
 
 | Module | What it gives you |
@@ -42,7 +49,7 @@ the deployed contracts do not use the event name the EIP specifies.
 | `chain` | mainnet + testnet RPC, sequencer feed, explorer, separate Blockscout `/api` + REST `/api/v2`, and viem-compatible chain objects |
 | `bridge` | documented mainnet/testnet L1 + L2 protocol contracts, Arbitrum precompiles, and gateway-emitted deposit/withdrawal events |
 | `dex` | **V2/V3/V4** event signatures, explicit caller/recipient roles, and address-scoped factory/PoolManager discovery targets |
-| `stocktokens` / ERC-8056 | the transfer event stock tokens **actually** emit and its verified `topic0`, exact bigint multiplier recovery, raw↔display conversion, corporate-action change detection, and peer-to-peer settlement reconstruction |
+| `stocktokens` / ERC-8056 | the transfer event stock tokens **actually** emit and its verified `topic0`, client-neutral ABI with per-member provenance, **bounded** multiplier estimation with exact feasible intervals, raw↔display conversion, corporate-action detection that will not fire on estimate noise, and peer-to-peer settlement reconstruction priced per raw **or** per displayed unit |
 | `feeds` / Oracle Guard | strict Chainlink directory loading, typed feed lookup and read calls, exact bigint price formatting, and fail-closed round/sequencer/pause assessment |
 | `preflight` / Transaction Firewall | strict action decoding, injected simulation and identity evidence, exact balance/fee/market checks, and withheld-or-ready transaction plans |
 | `getLogsPaged(getLogs, from, to, opts)` | exact-block-count log backfill: shrinks only on recognized size errors, bounds 429 retries, supports cancellation, and never retries consumer callbacks |
@@ -170,14 +177,19 @@ filter built from the spec computes a different `topic0` and matches zero logs,
 forever. That failure is silent and it does not look like a bug — it looks like
 a chain with no tokenized-equity activity on it.
 
+**A multiplier recovered from a transfer is an estimate, not a reading.** The
+contract computes `uiValue = floor(rawValue × multiplier / 1e18)`, so the
+low-order information is destroyed before the event exists. A true multiplier
+of 1.5 with a raw value of 3 emits `floor(4.5) = 4`; dividing back gives
+1.333…, which is not the multiplier. What can be recovered exactly is the
+*interval*.
+
 ```ts
 import { parseAbiItem } from "viem";
 import {
   TRANSFER_WITH_SCALED_UI_EVENT,
-  compareScaledUiMultiplier,
+  estimateScaledUiMultiplier,
   formatScaledUiMultiplier,
-  readScaledUiMultiplier,
-  toUiAmount,
 } from "robinhood-chain-kit";
 
 const logs = await client.getLogs({
@@ -188,29 +200,63 @@ const logs = await client.getLogs({
 });
 
 const { value, uiValue } = logs.at(-1)!.args;
-const read = readScaledUiMultiplier({ value, uiValue });
-if (!read.known) throw new Error(`multiplier unreadable: ${read.reason}`);
+const estimate = estimateScaledUiMultiplier({ value, uiValue });
+if (!estimate.estimated) throw new Error(`cannot bound the multiplier: ${estimate.reason}`);
 
-console.log(formatScaledUiMultiplier(read.multiplier)); // 4.000000000000000000
-console.log(toUiAmount(rawBalance, read.multiplier));   // what the holder sees
-
-const change = compareScaledUiMultiplier(previousMultiplier, read.multiplier);
-if (change.moved) {
-  // a corporate action landed. every historical figure derived from raw
-  // amounts across this boundary has changed meaning.
-  console.warn(`multiplier moved ${change.direction}`);
-}
+formatScaledUiMultiplier(estimate.multiplier);          // display value only
+estimate.lowerBound;                                    // hard fact
+estimate.upperBoundExclusive;                           // hard fact
 ```
 
-`readScaledUiMultiplier` fails closed: a zero raw value makes the ratio
-undefined rather than enormous, and "we cannot tell" is a different answer from
-"the multiplier is 1". Multipliers are `bigint` throughout, because a `number`
-cannot hold a uint256 ratio exactly and a figure that is quietly slightly wrong
-is the entire hazard.
+The interval narrows as the raw amount grows and collapses to a single value
+once the transfer is large relative to `1e18`. A whole-token transfer of an
+18-decimal token pins the multiplier exactly; a three-unit transfer bounds it
+between 1.33 and 1.67.
 
-`compareScaledUiMultiplier` reports **direction only**. A split and a dividend
-adjustment both move it up; the event carries nothing that separates them, so
-naming a cause here would be a guess wearing an API's clothes.
+**For a value you can put in a financial calculation, read the contract.**
+
+```ts
+import { getErc8056ReadCalls, ERC8056_VERIFICATION } from "robinhood-chain-kit";
+
+for (const call of getErc8056ReadCalls(stockToken)) {
+  call.functionName; // uiMultiplier | newUIMultiplier | effectiveAt
+  call.provenance;   // "draft-spec-unverified" — a revert means this
+                     // deployment does not expose it
+}
+ERC8056_VERIFICATION.TransferWithScaledUI; // "deployed-logs" — the only member
+                                           // confirmed against a real contract
+```
+
+`UIMULTIPLIER_UPDATED_EVENT` ships **without** a `topic0` constant. Publishing a
+hash for a signature nobody has confirmed against a deployed log would recreate
+the exact trap above, and a wrong `topic0` fails silently.
+
+### Detect a corporate action without inventing one
+
+Two transfers of different sizes under **one unchanged multiplier** produce
+different point estimates, because each was truncated differently. Comparing
+those points reports a corporate action every time the transfer sizes differ.
+
+```ts
+import { compareScaledUiEstimates, compareScaledUiMultiplier } from "robinhood-chain-kit";
+
+// estimates: compares BOUNDS, and only claims a change when no single
+// multiplier could have produced both observations
+compareScaledUiEstimates(before, after);
+// -> { comparable: true, moved: false }            ranges overlap: unproven
+// -> { comparable: true, moved: true, direction }  ranges disjoint: proven
+
+// authoritative contract readings only
+compareScaledUiMultiplier(previousMultiplier, currentMultiplier);
+```
+
+`moved: false` from `compareScaledUiEstimates` means *not provable from these
+two observations*, not *definitely unchanged*. A small adjustment inside two
+wide ranges is invisible to it, and the honest way to see that is a contract
+read.
+
+Both report **direction only**. A split and a dividend adjustment both move the
+multiplier up; nothing in the observation separates them.
 
 ### See the trades no DEX index can
 
@@ -221,26 +267,36 @@ or neither did. No pool was involved, which is exactly why a swap-based index
 cannot see any of it.
 
 ```ts
-import { inferSettlementPrice, pairDeliveryVersusPayment } from "robinhood-chain-kit";
+import {
+  inferRawSettlementPrice,
+  inferUiSettlementPrice,
+  pairDeliveryVersusPayment,
+} from "robinhood-chain-kit";
 
 const settlements = pairDeliveryVersusPayment({ stockLegs, cashLegs });
+const scales = { stockDecimals: 18, cashDecimals: 6, priceDecimals: 2 };
 
 for (const settlement of settlements) {
-  const price = inferSettlementPrice({
-    settlement,
-    stockDecimals: 18,
-    cashDecimals: 6,
-    priceDecimals: 2,
-  });
-  if (price.inferred) console.log(settlement.buyer, price.price); // "400.00"
+  // per RAW ERC-20 unit
+  inferRawSettlementPrice({ settlement, ...scales });
+  // -> { inferred: true, price: "400.00", decimals: 2, stockAmountMode: "raw" }
+
+  // per DISPLAYED share — pass the log's own uiValue, or an authoritative
+  // multiplier. both, or neither, throws.
+  inferUiSettlementPrice({ settlement, ...scales, stockUiValue });
+  // -> { inferred: true, price: "100.00", decimals: 2, stockAmountMode: "ui" }
 }
 ```
 
-Fails closed, hard. A settlement is reported only when a transaction carries
-exactly one stock leg and one cash leg, opposed between the same pair of
+**`settlement.stock.value` is a raw ERC-20 amount, not a share count.** Under a
+4x multiplier one raw unit is four displayed shares, so the same trade is 400
+per raw unit and 100 per share. Quoting the wrong one is a 4x error in a price,
+which is why the basis is in the result rather than in a comment.
+
+Pairing fails closed, hard. A settlement is reported only when a transaction
+carries exactly one stock leg and one cash leg, opposed between the same pair of
 addresses. Batches, routed fills, and anything with a third party in the middle
-are left unclassified rather than guessed at — the value of the output is that
-a reported settlement really is one.
+are left unclassified rather than guessed at.
 
 `inferred: true` is not decoration. **No venue quoted this price.** It is the
 ratio of two amounts in one transaction, and the two parties may have agreed it
@@ -283,6 +339,19 @@ const health = assessOracleHealth({
 if (!health.usable) console.error(health.issues);
 else console.log(health.formattedAnswer); // 123.45678900
 ```
+
+Remote metadata is a trust boundary. `parseChainlinkFeedDirectory` proves the
+document is well-shaped; it cannot prove it is the one the operator published,
+and a hijacked mirror can serve a schema-perfect directory pointing every feed
+at addresses it chose. Pin the bytes when the contents are load-bearing:
+
+```ts
+await loadChainlinkFeedDirectory({ expectedSha256: "<64 hex chars>" });
+```
+
+The digest is taken over the raw response body before parsing, and no value is
+hardcoded in this package — a pinned constant nobody maintains breaks for every
+consumer at once, so it is the caller's decision and the caller's upkeep.
 
 `pauseState: "unknown"` and `sequencer: { status: "unknown" }` fail closed.
 Use `"not-applicable"` only for assets that do not have corporate-action
@@ -371,7 +440,7 @@ Runnable scripts in [`examples/`](examples/):
 - [`watch-bridge.mts`](examples/watch-bridge.mts) — recent canonical ERC-20 deposits, with each token's actual decimals
 - [`scan-pools.mts`](examples/scan-pools.mts) — V2/V3/V4 discovery from verified deployment addresses, with streaming and resume bounds
 - [`market-session.mts`](examples/market-session.mts) — report regular-session context without claiming oracle freshness
-- [`stock-token-transfers.mts`](examples/stock-token-transfers.mts) — read a stock token's ERC-8056 multiplier from live logs and spot where a corporate action landed
+- [`stock-token-transfers.mts`](examples/stock-token-transfers.mts) — bound a stock token's ERC-8056 multiplier from live logs, prove a corporate action from disjoint ranges, and list the authoritative contract reads
 - [`oracle-guard.mts`](examples/oracle-guard.mts) — read a live feed and fail closed on unknown sequencer or pause state
 - [`preflight-transaction.mts`](examples/preflight-transaction.mts) — simulate and risk-check a native transfer without a signer or send call
 - [`preflight-erc20-transfer.mts`](examples/preflight-erc20-transfer.mts) — decode and approve a safe ERC-20 transfer plan using deterministic evidence

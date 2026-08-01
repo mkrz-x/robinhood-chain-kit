@@ -125,6 +125,88 @@ describe("loadChainlinkFeedDirectory", () => {
   });
 });
 
+describe("loadChainlinkFeedDirectory — integrity", () => {
+  /**
+   * Schema validation proves SHAPE, not authorship. A hijacked mirror can
+   * serve a perfectly-shaped directory pointing every feed at addresses it
+   * chose, and every assertion in the parser would pass.
+   */
+  const body = JSON.stringify([directoryRow]);
+  const serve = () =>
+    async () =>
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+
+  const digestOf = async (text: string) => {
+    const bytes = new TextEncoder().encode(text);
+    const hash = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  it("accepts a body whose digest matches the pin", async () => {
+    const feeds = await loadChainlinkFeedDirectory({
+      fetchImpl: serve(),
+      sleep: async () => {},
+      expectedSha256: await digestOf(body),
+    });
+    expect(feeds).toHaveLength(1);
+    expect(feeds[0]).toMatchObject({ baseAsset: "GOOGL" });
+  });
+
+  it("refuses a well-formed document that is not the pinned one", async () => {
+    // the attack this exists for: valid schema, attacker-chosen addresses
+    const swapped = JSON.stringify([
+      { ...directoryRow, proxyAddress: "0x000000000000000000000000000000000000dEaD" },
+    ]);
+    await expect(
+      loadChainlinkFeedDirectory({
+        fetchImpl: async () => new Response(swapped, { status: 200 }),
+        sleep: async () => {},
+        expectedSha256: await digestOf(body),
+      }),
+    ).rejects.toThrow(/integrity check failed/i);
+  });
+
+  it("names both digests so the mismatch can be investigated", async () => {
+    const expected = await digestOf(body);
+    await expect(
+      loadChainlinkFeedDirectory({
+        fetchImpl: async () => new Response(JSON.stringify([]), { status: 200 }),
+        sleep: async () => {},
+        expectedSha256: expected,
+      }),
+    ).rejects.toThrow(new RegExp(expected));
+  });
+
+  it("is case-insensitive about the pin's hex", async () => {
+    const feeds = await loadChainlinkFeedDirectory({
+      fetchImpl: serve(),
+      sleep: async () => {},
+      expectedSha256: (await digestOf(body)).toUpperCase(),
+    });
+    expect(feeds).toHaveLength(1);
+  });
+
+  it("rejects a malformed digest before making any request", async () => {
+    let called = false;
+    await expect(
+      loadChainlinkFeedDirectory({
+        fetchImpl: async () => {
+          called = true;
+          return new Response(body, { status: 200 });
+        },
+        expectedSha256: "not-a-digest",
+      }),
+    ).rejects.toThrow(TypeError);
+    expect(called).toBe(false);
+  });
+
+  it("leaves the unpinned path untouched", async () => {
+    // pinning is opt-in; the default must stay a plain validated load
+    const feeds = await loadChainlinkFeedDirectory({ fetchImpl: serve(), sleep: async () => {} });
+    expect(feeds).toHaveLength(1);
+  });
+});
+
 describe("feed lookup and ABI", () => {
   it("looks up proxy and secondary addresses case-insensitively", () => {
     const feeds = parseChainlinkFeedDirectory([directoryRow]);

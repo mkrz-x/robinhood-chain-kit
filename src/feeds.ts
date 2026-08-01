@@ -165,15 +165,49 @@ export interface LoadChainlinkFeedDirectoryOptions {
   attempts?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Lowercase hex SHA-256 of the response body, pinned by the caller.
+   *
+   * `parseChainlinkFeedDirectory` proves the document is well-SHAPED. It
+   * cannot prove it is the document the operator published — a compromised
+   * mirror, a hijacked CDN entry or an intercepting proxy can serve a
+   * schema-perfect directory pointing every feed at addresses it chose.
+   * Supplying a digest turns "this parses" into "this is the exact file I
+   * reviewed".
+   *
+   * No digest is hardcoded in this package. A pinned constant goes stale the
+   * moment the operator adds a feed, and one that nobody maintains breaks for
+   * every consumer at once, so pinning is the caller's decision and the
+   * caller's upkeep.
+   */
+  expectedSha256?: string;
+}
+
+const HEX_SHA256 = /^[0-9a-f]{64}$/i;
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error("expectedSha256 requires WebCrypto (globalThis.crypto.subtle)");
+  }
+  const digest = await subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
  * Load and atomically validate the Robinhood Chain feed directory. This makes
  * no request until explicitly called.
+ *
+ * Structural validation is not authentication. Pass `expectedSha256` when the
+ * directory's contents are load-bearing — see the option's own note.
  */
 export async function loadChainlinkFeedDirectory(
   options: LoadChainlinkFeedDirectoryOptions = {},
 ): Promise<ChainlinkFeed[]> {
+  const { expectedSha256 } = options;
+  if (expectedSha256 !== undefined && !HEX_SHA256.test(expectedSha256)) {
+    throw new TypeError("expectedSha256 must be a 64-character hex SHA-256 digest");
+  }
   const response = await fetchWithRetry(
     options.url ?? CHAINLINK_FEED_DIRECTORY_URL,
     { method: "GET", signal: options.signal },
@@ -188,7 +222,20 @@ export async function loadChainlinkFeedDirectory(
     await response.body?.cancel().catch(() => undefined);
     throw new Error(`Feed directory returned HTTP ${response.status}`);
   }
-  return parseChainlinkFeedDirectory(await response.json());
+  if (expectedSha256 === undefined) return parseChainlinkFeedDirectory(await response.json());
+
+  // hash the bytes actually received, BEFORE parsing. a digest taken over
+  // re-serialized JSON would match a document whose key order, whitespace or
+  // number formatting differs from the one that was reviewed, which is not
+  // the property anyone pins a digest for
+  const bytes = await response.arrayBuffer();
+  const actual = await sha256Hex(bytes);
+  if (actual !== expectedSha256.toLowerCase()) {
+    throw new Error(
+      `Feed directory integrity check failed: expected sha256 ${expectedSha256.toLowerCase()}, received ${actual}`,
+    );
+  }
+  return parseChainlinkFeedDirectory(JSON.parse(new TextDecoder().decode(bytes)));
 }
 
 /** Find a primary or secondary proxy without assuming address checksum casing. */

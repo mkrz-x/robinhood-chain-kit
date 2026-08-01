@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.8.0 — 2026-08-01
+
+Correctness release. Two figures in 0.7.0 were presented as exact and were
+not; both are financial numbers, and both were wrong in a way that looks
+right. Minor rather than patch because two public behaviours change.
+
+- **A multiplier recovered from one transfer cannot be exact, and 0.7.0 said
+  it was.** The contract computes `uiValue = floor(rawValue * multiplier /
+  1e18)`, so the low-order information is destroyed before the event is
+  emitted. With a true multiplier of 1.5 and a raw value of 3, the emitted
+  `uiValue` is `floor(4.5) = 4`, and dividing back gives 1.333… — not the
+  multiplier, and never was. Added `estimateScaledUiMultiplier`, which returns
+  the mathematically exact feasible interval (`lowerBound`,
+  `upperBoundExclusive`) alongside a midpoint labelled `estimated: true`.
+  Verified against a contract simulation over 79,527 observations: the true
+  multiplier lies inside the returned bounds every time.
+- **`readScaledUiMultiplier` is deprecated** and now delegates to the estimate.
+  Its `multiplier` is the interval midpoint rather than a floor division,
+  because the old value could fall *outside* the range of multipliers
+  consistent with the observation.
+- **`compareScaledUiMultiplier` is for authoritative contract readings only**,
+  and its `toleranceBps` now defaults to 0. The old default of 1 existed to
+  absorb estimate noise, which meant a dead band that would swallow a genuine
+  small corporate action. Added `compareScaledUiEstimates` for estimates: it
+  reports a change only when the two feasible ranges are **disjoint**, so two
+  differently sized transfers under one unchanged multiplier no longer
+  manufacture a corporate action that never happened.
+- **Settlement pricing now states its unit.** `settlement.stock.value` is a raw
+  ERC-20 amount, which is not the displayed share count once a multiplier is in
+  play: one raw unit under a 4x multiplier is four displayed shares, so a raw
+  price of 400 is a displayed price of 100. Added `inferRawSettlementPrice` and
+  `inferUiSettlementPrice`; every result now carries `stockAmountMode: "raw" |
+  "ui"`. The UI form requires either the contract's own `uiValue` or an
+  authoritative multiplier, and throws when given both or neither — a pricing
+  basis that can be silently defaulted is one that will be silently wrong.
+- **`inferSettlementPrice` is deprecated**, unchanged in behaviour, and now
+  documents that it prices per raw ERC-20 unit.
+- **ERC-8056 contract surface**: added `ERC8056_ABI`, `UIMULTIPLIER_UPDATED_EVENT`
+  and `getErc8056ReadCalls`, client-neutral and with no new runtime dependency.
+  `ERC8056_VERIFICATION` records, per member, whether it was confirmed against
+  deployed logs or taken from the draft text — only `TransferWithScaledUI` is
+  confirmed. **No topic0 is published for `UIMultiplierUpdated`**: shipping a
+  hash for a signature nobody has verified would recreate exactly the trap this
+  module warns about.
+- **Feed-directory integrity**: `loadChainlinkFeedDirectory` accepts an optional
+  `expectedSha256`, hashed over the raw response bytes before parsing. Schema
+  validation proves shape, not authorship — a hijacked mirror can serve a
+  perfectly-shaped directory pointing every feed at addresses it chose. No
+  digest is hardcoded: a pinned constant nobody maintains breaks for every
+  consumer at once, so pinning is the caller's decision.
+
 ## 0.7.0 — 2026-08-01
 
 - **ERC-8056 stock tokens**: added the transfer event Robinhood stock tokens

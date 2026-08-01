@@ -1,6 +1,6 @@
 {
   "name": "robinhood-chain-kit",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "ERC-8056 scaled-UI stock tokens, peer-to-peer settlement, transaction preflight, Oracle Guard, chain constants, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
   "license": "MIT",
   "type": "module",

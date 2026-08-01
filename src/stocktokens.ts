@@ -10,27 +10,30 @@ import { formatChainlinkAnswer } from "./feeds.js";
  * they were while the amount a holder is shown changes underneath them. Every
  * transfer emits both numbers: the raw `value` and the display `uiValue`.
  *
- * Consequences, in the order they bite:
+ * FOUR THINGS THIS MODULE KEEPS APART, because conflating any two of them
+ * produces a financial figure that is wrong and looks right:
  *
- * 1. Reading `balanceOf` alone gives you a number that is correct in raw units
- *    and wrong on screen the moment a corporate action lands.
- * 2. Any historical price, PnL figure, or leaderboard computed from raw
- *    amounts silently changes meaning across a split. It will not throw. It
- *    will look exactly like a right answer.
- * 3. The multiplier is only observable from the events, so a consumer that
- *    subscribes to plain `Transfer` never sees a corporate action happen.
+ * 1. **raw amount** — the ERC-20 unit the contract stores and `balanceOf`
+ *    returns. Authoritative, and not what a holder is shown.
+ * 2. **displayed (UI) amount** — the raw amount scaled by the multiplier. What
+ *    a holder is shown, and what "one share" means to a person.
+ * 3. **authoritative multiplier** — read from the contract. Exact.
+ * 4. **estimated multiplier** — inferred from one transfer's two amounts. NOT
+ *    exact, because `uiValue` was already truncated by integer division before
+ *    anyone saw it. See `estimateScaledUiMultiplier`.
  *
  * THE NAME TRAP, which is the reason this module exists at all:
  *
- * EIP-8056 names the event `TransferWithUIAmount`. The contracts deployed on
- * Robinhood Chain emit **`TransferWithScaledUI`**. This is not a subtle
- * difference in an ABI you can shrug at — a `getLogs` filter built from the
- * spec's name computes a different topic0 and matches **zero logs, forever**.
- * The failure is silent and it does not look like a bug. It looks like a chain
- * with no tokenized-equity activity on it.
+ * EIP-8056 names the transfer event `TransferWithUIAmount`. The contracts
+ * deployed on Robinhood Chain emit **`TransferWithScaledUI`**. This is not a
+ * subtle difference in an ABI you can shrug at — a `getLogs` filter built from
+ * the spec's name computes a different topic0 and matches **zero logs,
+ * forever**. The failure is silent and it does not look like a bug. It looks
+ * like a chain with no tokenized-equity activity on it.
  *
  * The signature and topic0 below were taken from a deployed stock token's own
- * logs, not from the ERC text.
+ * logs, not from the ERC text. The specification is still evolving, so where
+ * the draft and a deployed contract disagree, the deployment wins.
  */
 
 /**
@@ -67,6 +70,19 @@ export const ERC8056_SPEC_TOPIC0 =
   "0x0226a2f5c1ae0e071aeec3d4ebafcefdc5c549be11f40ed27e76e802acccf374";
 
 /**
+ * The multiplier-update event, **from the draft text and NOT verified against
+ * any deployed contract**.
+ *
+ * Deliberately shipped without a topic0 constant. Publishing a hash for a
+ * signature nobody has confirmed would recreate exactly the trap the rest of
+ * this module exists to warn about, and a wrong topic0 fails silently. Derive
+ * it yourself once you have confirmed the signature against a real log, or
+ * treat a corporate action as observable through the multiplier changing.
+ */
+export const UIMULTIPLIER_UPDATED_EVENT =
+  "event UIMultiplierUpdated(uint256 oldMultiplier, uint256 newMultiplier, uint256 effectiveAt)";
+
+/**
  * Plain ERC-20 Transfer, for the cash side of a settlement.
  *
  * Every token on the chain emits this topic, so a subscription MUST be address
@@ -76,11 +92,117 @@ export const ERC8056_SPEC_TOPIC0 =
 export const ERC20_TRANSFER_EVENT =
   "event Transfer(address indexed from, address indexed to, uint256 value)";
 
+/* -------------------------------------------------------------- contract */
+
+/**
+ * Client-neutral ERC-8056 ABI. No viem import; pass it to any client that
+ * accepts a JSON ABI.
+ *
+ * READ THE VERIFICATION TABLE BELOW BEFORE RELYING ON A MEMBER. Only the
+ * transfer event has been confirmed against a deployed contract's own logs.
+ * The rest come from the draft specification and may revert, may carry
+ * different parameter types, or may not exist. That is stated in code rather
+ * than in a paragraph because this package's entire value is refusing to
+ * present an unverified thing as a verified one.
+ */
+export const ERC8056_ABI = [
+  {
+    type: "function",
+    name: "uiMultiplier",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "newUIMultiplier",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "effectiveAt",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "event",
+    name: "TransferWithScaledUI",
+    inputs: [
+      { name: "from", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: true },
+      { name: "value", type: "uint256", indexed: false },
+      { name: "uiValue", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "UIMultiplierUpdated",
+    inputs: [
+      { name: "oldMultiplier", type: "uint256", indexed: false },
+      { name: "newMultiplier", type: "uint256", indexed: false },
+      { name: "effectiveAt", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+export type Erc8056Provenance = "deployed-logs" | "draft-spec-unverified";
+
+/**
+ * Where each ABI member came from, machine-readable.
+ *
+ * `deployed-logs` means it was read off a real contract's events on chain
+ * 4663. `draft-spec-unverified` means it is the draft's shape and nothing
+ * more — a call may revert and an event filter may match nothing.
+ */
+export const ERC8056_VERIFICATION: Readonly<Record<string, Erc8056Provenance>> = Object.freeze({
+  TransferWithScaledUI: "deployed-logs",
+  uiMultiplier: "draft-spec-unverified",
+  newUIMultiplier: "draft-spec-unverified",
+  effectiveAt: "draft-spec-unverified",
+  UIMultiplierUpdated: "draft-spec-unverified",
+});
+
+export interface Erc8056ReadCall {
+  address: `0x${string}`;
+  abi: typeof ERC8056_ABI;
+  functionName: "uiMultiplier" | "newUIMultiplier" | "effectiveAt";
+  /** where this member's shape came from — see `ERC8056_VERIFICATION` */
+  provenance: Erc8056Provenance;
+}
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * Build the authoritative multiplier reads for a stock token.
+ *
+ * This is how you get a multiplier you can trust. An estimate recovered from
+ * a transfer is bounded but not exact; a contract read is the value itself.
+ * Prefer this everywhere a number will be shown to a person or used in a
+ * financial calculation.
+ *
+ * Every call here is `draft-spec-unverified`, so a revert means the deployment
+ * does not expose that member rather than that something is broken. Handle
+ * each independently instead of failing the batch.
+ */
+export function getErc8056ReadCalls(tokenAddress: string): Erc8056ReadCall[] {
+  if (!ADDRESS.test(tokenAddress)) throw new TypeError(`Invalid token address: ${tokenAddress}`);
+  const address = tokenAddress as `0x${string}`;
+  return (["uiMultiplier", "newUIMultiplier", "effectiveAt"] as const).map((functionName) => ({
+    address,
+    abi: ERC8056_ABI,
+    functionName,
+    provenance: ERC8056_VERIFICATION[functionName]!,
+  }));
+}
+
+/* ------------------------------------------------------------- multiplier */
+
 /** The multiplier is fixed-point with 18 decimals: 1e18 means "unadjusted". */
 export const SCALED_UI_DECIMALS = 18;
 export const SCALED_UI_ONE = 10n ** BigInt(SCALED_UI_DECIMALS);
-
-/* ------------------------------------------------------------- multiplier */
 
 export interface ScaledUiTransfer {
   /** raw token units, as stored by the contract */
@@ -97,34 +219,101 @@ export type ScaledUiMultiplierUnknownReason =
   /** a uint256 field arrived negative, so the log was decoded wrongly */
   | "negative-amount";
 
+export type ScaledUiMultiplierEstimate =
+  | {
+      estimated: true;
+      /**
+       * Midpoint of the feasible range. A point to display, never a value to
+       * compare for equality — use the bounds for that.
+       */
+      multiplier: bigint;
+      /** smallest multiplier consistent with the observation, inclusive */
+      lowerBound: bigint;
+      /** smallest multiplier NOT consistent with the observation */
+      upperBoundExclusive: bigint;
+    }
+  | { estimated: false; reason: ScaledUiMultiplierUnknownReason };
+
+/** ceil(a / b) for positive bigints. */
+const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
+
+/**
+ * Bound the multiplier from one transfer's two amounts.
+ *
+ * **This cannot be exact, and the previous version of this function was wrong
+ * to present it as such.** The contract computes
+ *
+ *     uiValue = floor(rawValue * multiplier / 1e18)
+ *
+ * so the low-order information is destroyed before the event is emitted. With
+ * a true multiplier of 1.5 and a raw value of 3, the emitted uiValue is
+ * floor(4.5) = 4, and dividing back gives 1.333…, which is not the multiplier
+ * and never was.
+ *
+ * What CAN be recovered exactly is the interval. Inverting the floor:
+ *
+ *     uiValue <= rawValue * M / 1e18 < uiValue + 1
+ *     ceil(uiValue * 1e18 / rawValue) <= M < ceil((uiValue + 1) * 1e18 / rawValue)
+ *
+ * so `lowerBound` and `upperBoundExclusive` are hard facts and `multiplier` is
+ * the interval midpoint, which minimises worst-case error and is a display
+ * value only. On the example above the interval is [1.333…334, 1.666…667) and
+ * its midpoint is exactly 1.5 — but that is a property of that observation,
+ * not a guarantee.
+ *
+ * The interval narrows as the raw amount grows, and collapses to a single
+ * value once the raw amount is large relative to 1e18. A whole-token transfer
+ * of an 18-decimal token pins the multiplier exactly; a 3-unit transfer does
+ * not come close.
+ *
+ * For a value you can rely on, read the contract — see `getErc8056ReadCalls`.
+ *
+ * Fails closed. A zero raw value makes the ratio undefined, not enormous, and
+ * "we cannot tell" is a different answer from "the multiplier is 1".
+ */
+export function estimateScaledUiMultiplier(transfer: ScaledUiTransfer): ScaledUiMultiplierEstimate {
+  const { value, uiValue } = transfer;
+  if (typeof value !== "bigint" || typeof uiValue !== "bigint") {
+    throw new TypeError("value and uiValue must be bigints");
+  }
+  if (value < 0n || uiValue < 0n) return { estimated: false, reason: "negative-amount" };
+  if (value === 0n) return { estimated: false, reason: "zero-raw-value" };
+  if (uiValue === 0n) return { estimated: false, reason: "zero-ui-value" };
+  const lowerBound = ceilDiv(uiValue * SCALED_UI_ONE, value);
+  const upperBoundExclusive = ceilDiv((uiValue + 1n) * SCALED_UI_ONE, value);
+  // midpoint of the inclusive range, so the point estimate is always feasible
+  const multiplier = lowerBound + (upperBoundExclusive - 1n - lowerBound) / 2n;
+  return { estimated: true, multiplier, lowerBound, upperBoundExclusive };
+}
+
 export type ScaledUiMultiplierResult =
   | { known: true; multiplier: bigint }
   | { known: false; reason: ScaledUiMultiplierUnknownReason };
 
 /**
- * Recover the multiplier from one transfer.
+ * @deprecated Presents an estimate as an exact recovered multiplier, which it
+ * is not — `uiValue` is truncated by the contract before it is emitted. Use
+ * {@link estimateScaledUiMultiplier} for the bounded estimate, or
+ * {@link getErc8056ReadCalls} for the authoritative value.
  *
- * Returned as a bigint scaled by 1e18, never a float. A JavaScript number
- * cannot hold a uint256 ratio exactly, and the entire hazard here is a figure
- * that is quietly slightly wrong, so this refuses to introduce one.
- *
- * Fails closed. A zero raw value makes the ratio undefined, not enormous, and
- * "we cannot tell" is a different answer from "the multiplier is 1" — callers
- * that flatten the two are the ones that publish a split-adjusted figure as if
- * it were unadjusted.
+ * Kept so 0.7.0 callers keep compiling. `multiplier` is now the feasible
+ * interval's midpoint rather than a floor division, because the old value
+ * could fall outside the range of multipliers consistent with the observation.
  */
 export function readScaledUiMultiplier(transfer: ScaledUiTransfer): ScaledUiMultiplierResult {
-  const { value, uiValue } = transfer;
-  if (typeof value !== "bigint" || typeof uiValue !== "bigint") {
-    throw new TypeError("value and uiValue must be bigints");
-  }
-  if (value < 0n || uiValue < 0n) return { known: false, reason: "negative-amount" };
-  if (value === 0n) return { known: false, reason: "zero-raw-value" };
-  if (uiValue === 0n) return { known: false, reason: "zero-ui-value" };
-  return { known: true, multiplier: (uiValue * SCALED_UI_ONE) / value };
+  const estimate = estimateScaledUiMultiplier(transfer);
+  return estimate.estimated
+    ? { known: true, multiplier: estimate.multiplier }
+    : { known: false, reason: estimate.reason };
 }
 
-/** Raw units to the amount a holder is shown. */
+/**
+ * Raw units to the amount a holder is shown.
+ *
+ * `multiplier` should be an AUTHORITATIVE value read from the contract. Passing
+ * an estimate propagates its uncertainty into every figure downstream without
+ * saying so anywhere.
+ */
 export function toUiAmount(rawValue: bigint, multiplier: bigint): bigint {
   if (typeof rawValue !== "bigint" || typeof multiplier !== "bigint") {
     throw new TypeError("rawValue and multiplier must be bigints");
@@ -158,17 +347,22 @@ export type ScaledUiMultiplierChange =
   | { moved: true; direction: "up" | "down"; previous: bigint; current: bigint };
 
 /**
- * Did a corporate action land between two observations?
+ * Did a corporate action land between two AUTHORITATIVE multiplier readings?
  *
- * Deliberately reports only DIRECTION. The multiplier moving up is consistent
- * with a split and with a dividend adjustment; moving down is consistent with
- * a reverse split and with a correction. The event carries nothing that
- * separates them, so naming the cause here would be a guess wearing an API's
- * clothes. Pair this with a corporate-actions calendar if you need the reason.
+ * **Contract reads only.** Two estimates recovered from differently sized
+ * transfers disagree under an unchanged multiplier — that is arithmetic, not a
+ * corporate action — and feeding them here manufactures events that never
+ * happened. Use {@link compareScaledUiEstimates} for estimates; it works on
+ * intervals and will not claim a change unless the ranges are disjoint.
  *
- * `toleranceBps` exists because the multiplier is recovered by division and
- * two transfers under the same multiplier can differ in the last unit. The
- * default treats anything under a basis point as noise.
+ * Reports DIRECTION only. The multiplier moving up is consistent with a split
+ * and with a dividend adjustment; moving down is consistent with a reverse
+ * split and with a correction. Nothing in the observation separates them, so
+ * naming the cause here would be a guess wearing an API's clothes.
+ *
+ * `toleranceBps` defaults to 0. Authoritative values have no noise to absorb,
+ * and a non-zero tolerance here would hide a real, small adjustment. It is
+ * retained only for callers who deliberately want a dead band.
  */
 export function compareScaledUiMultiplier(
   previous: bigint,
@@ -178,15 +372,52 @@ export function compareScaledUiMultiplier(
   if (typeof previous !== "bigint" || typeof current !== "bigint") {
     throw new TypeError("previous and current must be bigints");
   }
-  const toleranceBps = options.toleranceBps ?? 1;
+  const toleranceBps = options.toleranceBps ?? 0;
   if (!Number.isInteger(toleranceBps) || toleranceBps < 0) {
     throw new RangeError("toleranceBps must be a non-negative integer");
   }
+  if (previous === current) return { moved: false };
   const difference = current > previous ? current - previous : previous - current;
   const scale = previous > 0n ? previous : SCALED_UI_ONE;
   // difference/scale > toleranceBps/10000, without leaving bigint
   if (difference * 10_000n <= BigInt(toleranceBps) * scale) return { moved: false };
   return { moved: true, direction: current > previous ? "up" : "down", previous, current };
+}
+
+export type ScaledUiEstimateComparison =
+  | { comparable: false; reason: ScaledUiMultiplierUnknownReason }
+  /** the ranges overlap, so no change is provable from these two observations */
+  | { comparable: true; moved: false }
+  | { comparable: true; moved: true; direction: "up" | "down" };
+
+/**
+ * Compare two ESTIMATES without inventing a corporate action.
+ *
+ * Two transfers under one unchanged multiplier produce different point
+ * estimates whenever their raw amounts differ, because each is truncated
+ * differently. Comparing those points reports a change every time the transfer
+ * sizes differ, which is the false-positive this function exists to prevent.
+ *
+ * A change is only reported when the two feasible ranges are **disjoint**: no
+ * single multiplier could have produced both observations. That is a proof
+ * rather than a signal. Overlapping ranges return `moved: false`, which means
+ * "not provable from these two", not "definitely unchanged" — a small
+ * adjustment inside two wide ranges is invisible here, and the honest way to
+ * see it is a contract read.
+ */
+export function compareScaledUiEstimates(
+  previous: ScaledUiMultiplierEstimate,
+  current: ScaledUiMultiplierEstimate,
+): ScaledUiEstimateComparison {
+  if (!previous.estimated) return { comparable: false, reason: previous.reason };
+  if (!current.estimated) return { comparable: false, reason: current.reason };
+  if (current.lowerBound >= previous.upperBoundExclusive) {
+    return { comparable: true, moved: true, direction: "up" };
+  }
+  if (previous.lowerBound >= current.upperBoundExclusive) {
+    return { comparable: true, moved: true, direction: "down" };
+  }
+  return { comparable: true, moved: false };
 }
 
 /* ------------------------------------------------------------- settlement */
@@ -202,6 +433,7 @@ export interface SettlementLeg {
   token: string;
   from: string;
   to: string;
+  /** RAW ERC-20 units. For a stock token this is not the displayed amount. */
   value: bigint;
 }
 
@@ -275,19 +507,65 @@ export function pairDeliveryVersusPayment(input: {
   return settlements;
 }
 
+/** Which stock unit a settlement price is quoted per. */
+export type StockAmountMode = "raw" | "ui";
+
+export type SettlementPriceUnknownReason =
+  | "zero-stock-amount"
+  | "zero-cash-amount"
+  /** the multiplier scaled the raw amount down to nothing */
+  | "zero-ui-stock-amount";
+
 export type SettlementPriceResult =
   | {
       /** always true when a price is returned, and named to be read at the call site */
       inferred: true;
-      /** cash per whole stock token, as an exact decimal string */
+      /** cash per stock unit, as an exact decimal string */
       price: string;
       /** the scale `price` is expressed at */
       decimals: number;
+      /** WHICH stock unit the price is per — raw ERC-20, or displayed shares */
+      stockAmountMode: StockAmountMode;
     }
-  | { inferred: false; reason: "zero-stock-amount" | "zero-cash-amount" };
+  | { inferred: false; reason: SettlementPriceUnknownReason };
+
+interface PriceScales {
+  stockDecimals: number;
+  cashDecimals: number;
+  priceDecimals?: number;
+}
+
+function assertDecimals(entries: readonly (readonly [string, number])[]): void {
+  for (const [name, value] of entries) {
+    if (!Number.isInteger(value) || value < 0 || value > 255) {
+      throw new RangeError(`${name} must be an integer between 0 and 255`);
+    }
+  }
+}
+
+function divideExact(
+  cashAmount: bigint,
+  stockAmount: bigint,
+  scales: Required<PriceScales>,
+  stockAmountMode: StockAmountMode,
+  zeroStockReason: SettlementPriceUnknownReason,
+): SettlementPriceResult {
+  if (stockAmount <= 0n) return { inferred: false, reason: zeroStockReason };
+  if (cashAmount <= 0n) return { inferred: false, reason: "zero-cash-amount" };
+  // (cash / 10^cashDecimals) / (stock / 10^stockDecimals), carried at priceDecimals
+  const numerator =
+    cashAmount * 10n ** BigInt(scales.stockDecimals) * 10n ** BigInt(scales.priceDecimals);
+  const denominator = stockAmount * 10n ** BigInt(scales.cashDecimals);
+  return {
+    inferred: true,
+    price: formatChainlinkAnswer(numerator / denominator, scales.priceDecimals),
+    decimals: scales.priceDecimals,
+    stockAmountMode,
+  };
+}
 
 /**
- * Cash per stock token for one settlement.
+ * Cash per RAW stock token unit.
  *
  * `inferred: true` is not decoration. No venue quoted this price. It is the
  * ratio of two amounts in a transaction, and the two parties may have agreed
@@ -295,40 +573,106 @@ export type SettlementPriceResult =
  * a reconstruction and say so wherever it is displayed. A count of settlements
  * is a hard fact; the level any one of them printed at is not.
  *
+ * **This is a price per raw ERC-20 unit, not per displayed share.** After a
+ * corporate action the two differ by the multiplier: one raw unit under a 4x
+ * multiplier is four displayed shares, so a raw price of 400 is a displayed
+ * price of 100. If you are showing a number to a person who thinks in shares,
+ * you want {@link inferUiSettlementPrice}.
+ *
  * Exact throughout: the ratio is taken in bigint at `priceDecimals` and
  * formatted without ever touching a float.
  */
-export function inferSettlementPrice(input: {
-  settlement: DeliveryVersusPayment;
-  /** decimals of the stock token */
-  stockDecimals: number;
-  /** decimals of the cash token */
-  cashDecimals: number;
-  /** scale of the returned price string */
-  priceDecimals?: number;
-}): SettlementPriceResult {
-  const { settlement, stockDecimals, cashDecimals } = input;
+export function inferRawSettlementPrice(
+  input: { settlement: DeliveryVersusPayment } & PriceScales,
+): SettlementPriceResult {
   const priceDecimals = input.priceDecimals ?? 18;
-  for (const [name, value] of [
-    ["stockDecimals", stockDecimals],
-    ["cashDecimals", cashDecimals],
+  assertDecimals([
+    ["stockDecimals", input.stockDecimals],
+    ["cashDecimals", input.cashDecimals],
     ["priceDecimals", priceDecimals],
-  ] as const) {
-    if (!Number.isInteger(value) || value < 0 || value > 255) {
-      throw new RangeError(`${name} must be an integer between 0 and 255`);
-    }
-  }
-  const stockAmount = settlement.stock.value;
-  const cashAmount = settlement.cash.value;
-  if (stockAmount <= 0n) return { inferred: false, reason: "zero-stock-amount" };
-  if (cashAmount <= 0n) return { inferred: false, reason: "zero-cash-amount" };
+  ]);
+  return divideExact(
+    input.settlement.cash.value,
+    input.settlement.stock.value,
+    { ...input, priceDecimals },
+    "raw",
+    "zero-stock-amount",
+  );
+}
 
-  // (cash / 10^cashDecimals) / (stock / 10^stockDecimals), carried at priceDecimals
-  const numerator = cashAmount * 10n ** BigInt(stockDecimals) * 10n ** BigInt(priceDecimals);
-  const denominator = stockAmount * 10n ** BigInt(cashDecimals);
-  return {
-    inferred: true,
-    price: formatChainlinkAnswer(numerator / denominator, priceDecimals),
-    decimals: priceDecimals,
-  };
+export type UiSettlementPriceInput = { settlement: DeliveryVersusPayment } & PriceScales &
+  (
+    | {
+        /** displayed stock amount, e.g. the transfer's own `uiValue` */
+        stockUiValue: bigint;
+        stockMultiplier?: never;
+      }
+    | {
+        /** AUTHORITATIVE multiplier; an estimate imports its uncertainty here */
+        stockMultiplier: bigint;
+        stockUiValue?: never;
+      }
+  );
+
+/**
+ * Cash per DISPLAYED stock unit — the price a person reading "shares" means.
+ *
+ * The displayed amount must be supplied, never guessed. Pass the transfer's own
+ * `uiValue`, which is exact and came from the contract, or an authoritative
+ * multiplier read from the contract. Supplying both, or neither, throws: a
+ * pricing basis that can be silently defaulted is a pricing basis that will be
+ * silently wrong.
+ *
+ * `stockMultiplier` is the weaker of the two inputs. `uiValue` is what the
+ * contract itself computed; a multiplier passed here is applied by this
+ * library and truncates the same way the contract does, so it can land one
+ * unit off. Prefer `stockUiValue` when the log gives it to you, which it
+ * always does.
+ */
+export function inferUiSettlementPrice(input: UiSettlementPriceInput): SettlementPriceResult {
+  const priceDecimals = input.priceDecimals ?? 18;
+  assertDecimals([
+    ["stockDecimals", input.stockDecimals],
+    ["cashDecimals", input.cashDecimals],
+    ["priceDecimals", priceDecimals],
+  ]);
+  const hasUiValue = input.stockUiValue !== undefined;
+  const hasMultiplier = input.stockMultiplier !== undefined;
+  if (hasUiValue === hasMultiplier) {
+    throw new TypeError("provide exactly one of stockUiValue or stockMultiplier");
+  }
+  let uiStockAmount: bigint;
+  if (hasUiValue) {
+    if (typeof input.stockUiValue !== "bigint") throw new TypeError("stockUiValue must be a bigint");
+    if (input.stockUiValue < 0n) throw new RangeError("stockUiValue must not be negative");
+    uiStockAmount = input.stockUiValue;
+  } else {
+    if (typeof input.stockMultiplier !== "bigint") {
+      throw new TypeError("stockMultiplier must be a bigint");
+    }
+    if (input.stockMultiplier <= 0n) throw new RangeError("stockMultiplier must be positive");
+    uiStockAmount = toUiAmount(input.settlement.stock.value, input.stockMultiplier);
+  }
+  return divideExact(
+    input.settlement.cash.value,
+    uiStockAmount,
+    { stockDecimals: input.stockDecimals, cashDecimals: input.cashDecimals, priceDecimals },
+    "ui",
+    "zero-ui-stock-amount",
+  );
+}
+
+/**
+ * @deprecated Prices per RAW ERC-20 unit, which is not the displayed share
+ * amount once a corporate action has landed. Call
+ * {@link inferRawSettlementPrice} to keep this behaviour explicitly, or
+ * {@link inferUiSettlementPrice} for a price per displayed share.
+ *
+ * Behaviour is unchanged from 0.7.0; the result now also carries
+ * `stockAmountMode: "raw"` so an existing call site can be read correctly.
+ */
+export function inferSettlementPrice(
+  input: { settlement: DeliveryVersusPayment } & PriceScales,
+): SettlementPriceResult {
+  return inferRawSettlementPrice(input);
 }
