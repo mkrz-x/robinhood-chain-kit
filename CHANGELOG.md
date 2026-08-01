@@ -1,6 +1,29 @@
 # Changelog
 
-## 0.6.0 — 2026-07-26
+## 0.7.0 — 2026-08-01
+
+- **ERC-8056 stock tokens**: added the transfer event Robinhood stock tokens
+  actually emit, its verified `topic0`, exact bigint multiplier recovery,
+  raw/display conversion, and corporate-action change detection.
+  **The name is the point:** EIP-8056 calls the event `TransferWithUIAmount`
+  and the deployed contracts emit `TransferWithScaledUI`. A filter built from
+  the spec's text computes a different topic and matches zero logs forever,
+  which does not look like a bug — it looks like a chain with no
+  tokenized-equity activity. Both topics are exported, and the tests hash the
+  signatures rather than trusting the constants.
+- **Peer-to-peer settlement**: `pairDeliveryVersusPayment` reconstructs trades
+  that never touched a pool, from a stock leg and a cash leg opposed inside one
+  transaction. Fails closed — a settlement is only reported when exactly one of
+  each is present between the same two addresses, so batches and routed fills
+  are left unclassified rather than guessed at.
+- **Inferred settlement price**: `inferSettlementPrice` divides the two legs
+  exactly across differing decimals, and carries `inferred: true` in the result
+  because no venue quoted it. A count of settlements is a hard fact; the level
+  any one printed at is a reconstruction.
+- Multipliers are bigint throughout. A `number` cannot hold a uint256 ratio
+  exactly, and a figure that is quietly slightly wrong is the whole hazard.
+
+## 0.6.0 — 2026-07-26 (published 2026-08-01)
 
 - **Transaction Firewall**: added strict transaction normalization, conservative
   native/ERC-20/operator action decoding, injected simulation and RPC evidence,
@@ -21,7 +44,7 @@
 - **No execution authority**: the public surface prepares explainable plans but
   contains no wallet, private-key, signer, broadcaster, or send API.
 
-## 0.5.0 — 2026-07-26
+## 0.5.0 — 2026-07-26 (developed, never published to npm)
 
 - **Oracle Guard**: added a strict Chainlink feed-directory loader and parser,
   metadata queries, Aggregator V3 ABI/read helpers, exact bigint price
@@ -34,7 +57,7 @@
   validate explorer JSON shapes, while package checks execute both ESM import
   and CommonJS require from a clean tarball installation.
 
-## 0.4.0 — 2026-07-26
+## 0.4.0 — 2026-07-26 (developed, never published to npm)
 
 - **Correct paged-log semantics**: `chunkSize` is now an exact inclusive block
   count; callback failures are never mistaken for RPC failures; only recognized

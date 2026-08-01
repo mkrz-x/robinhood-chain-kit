@@ -1,7 +1,7 @@
 {
   "name": "robinhood-chain-kit",
-  "version": "0.6.0",
-  "description": "Transaction preflight, Oracle Guard, chain constants, bridge contracts, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
+  "version": "0.7.0",
+  "description": "ERC-8056 scaled-UI stock tokens, peer-to-peer settlement, transaction preflight, Oracle Guard, chain constants, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -26,6 +26,7 @@
     "publint": "^0.3.22",
     "tsup": "^8.5.0",
     "typescript": "^5.5.0",
+    "viem": "^2.55.10",
     "vitest": "^3.0.0"
   },
   "repository": {
@@ -60,7 +61,14 @@
     "price-feeds",
     "transaction-preflight",
     "transaction-simulation",
-    "action-planner"
+    "action-planner",
+    "erc-8056",
+    "erc8056",
+    "tokenized-equities",
+    "corporate-actions",
+    "stock-tokens",
+    "settlement",
+    "delivery-versus-payment"
   ],
   "sideEffects": false,
   "exports": {

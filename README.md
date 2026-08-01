@@ -30,6 +30,11 @@ configuration, trusted DEX event scopes, US regular-session context, independent
 oracle-heartbeat checks, and resilient RPC/HTTP access. This package keeps those
 primitives typed, tested, and free of runtime dependencies.
 
+It also carries the one thing that makes this chain different from every other
+L2, and the one that costs the most to learn the hard way: tokenized equities
+adjust through an **ERC-8056 scaled-UI multiplier** rather than by minting, and
+the deployed contracts do not use the event name the EIP specifies.
+
 ## What's inside
 
 | Module | What it gives you |
@@ -37,6 +42,7 @@ primitives typed, tested, and free of runtime dependencies.
 | `chain` | mainnet + testnet RPC, sequencer feed, explorer, separate Blockscout `/api` + REST `/api/v2`, and viem-compatible chain objects |
 | `bridge` | documented mainnet/testnet L1 + L2 protocol contracts, Arbitrum precompiles, and gateway-emitted deposit/withdrawal events |
 | `dex` | **V2/V3/V4** event signatures, explicit caller/recipient roles, and address-scoped factory/PoolManager discovery targets |
+| `stocktokens` / ERC-8056 | the transfer event stock tokens **actually** emit and its verified `topic0`, exact bigint multiplier recovery, raw↔display conversion, corporate-action change detection, and peer-to-peer settlement reconstruction |
 | `feeds` / Oracle Guard | strict Chainlink directory loading, typed feed lookup and read calls, exact bigint price formatting, and fail-closed round/sequencer/pause assessment |
 | `preflight` / Transaction Firewall | strict action decoding, injected simulation and identity evidence, exact balance/fee/market checks, and withheld-or-ready transaction plans |
 | `getLogsPaged(getLogs, from, to, opts)` | exact-block-count log backfill: shrinks only on recognized size errors, bounds 429 retries, supports cancellation, and never retries consumer callbacks |
@@ -151,6 +157,96 @@ const targets = getDexDiscoveryTargets({
 V2 `to` and V3 `recipient` are output recipients, not guaranteed economic
 actors. V4 `sender` is normally periphery. Treat transaction origin, routers,
 smart accounts, and beneficiaries as separate roles.
+
+### Read a tokenized equity without getting the split wrong
+
+Corporate actions on this chain do not mint or burn. The contract carries a
+multiplier, raw balances stay exactly where they were, and the amount a holder
+is shown changes underneath them. Every transfer emits both numbers.
+
+**The event is not the one EIP-8056 names.** The spec says
+`TransferWithUIAmount`; the deployed contracts emit `TransferWithScaledUI`. A
+filter built from the spec computes a different `topic0` and matches zero logs,
+forever. That failure is silent and it does not look like a bug — it looks like
+a chain with no tokenized-equity activity on it.
+
+```ts
+import { parseAbiItem } from "viem";
+import {
+  TRANSFER_WITH_SCALED_UI_EVENT,
+  compareScaledUiMultiplier,
+  formatScaledUiMultiplier,
+  readScaledUiMultiplier,
+  toUiAmount,
+} from "robinhood-chain-kit";
+
+const logs = await client.getLogs({
+  address: stockToken,
+  event: parseAbiItem(TRANSFER_WITH_SCALED_UI_EVENT),
+  fromBlock,
+  toBlock,
+});
+
+const { value, uiValue } = logs.at(-1)!.args;
+const read = readScaledUiMultiplier({ value, uiValue });
+if (!read.known) throw new Error(`multiplier unreadable: ${read.reason}`);
+
+console.log(formatScaledUiMultiplier(read.multiplier)); // 4.000000000000000000
+console.log(toUiAmount(rawBalance, read.multiplier));   // what the holder sees
+
+const change = compareScaledUiMultiplier(previousMultiplier, read.multiplier);
+if (change.moved) {
+  // a corporate action landed. every historical figure derived from raw
+  // amounts across this boundary has changed meaning.
+  console.warn(`multiplier moved ${change.direction}`);
+}
+```
+
+`readScaledUiMultiplier` fails closed: a zero raw value makes the ratio
+undefined rather than enormous, and "we cannot tell" is a different answer from
+"the multiplier is 1". Multipliers are `bigint` throughout, because a `number`
+cannot hold a uint256 ratio exactly and a figure that is quietly slightly wrong
+is the entire hazard.
+
+`compareScaledUiMultiplier` reports **direction only**. A split and a dividend
+adjustment both move it up; the event carries nothing that separates them, so
+naming a cause here would be a guess wearing an API's clothes.
+
+### See the trades no DEX index can
+
+A stock-token transfer and a stablecoin transfer inside the same transaction,
+opposed between the same two addresses, is a trade by construction: one side
+gave up the asset, the other gave up the cash, and both legs committed together
+or neither did. No pool was involved, which is exactly why a swap-based index
+cannot see any of it.
+
+```ts
+import { inferSettlementPrice, pairDeliveryVersusPayment } from "robinhood-chain-kit";
+
+const settlements = pairDeliveryVersusPayment({ stockLegs, cashLegs });
+
+for (const settlement of settlements) {
+  const price = inferSettlementPrice({
+    settlement,
+    stockDecimals: 18,
+    cashDecimals: 6,
+    priceDecimals: 2,
+  });
+  if (price.inferred) console.log(settlement.buyer, price.price); // "400.00"
+}
+```
+
+Fails closed, hard. A settlement is reported only when a transaction carries
+exactly one stock leg and one cash leg, opposed between the same pair of
+addresses. Batches, routed fills, and anything with a third party in the middle
+are left unclassified rather than guessed at — the value of the output is that
+a reported settlement really is one.
+
+`inferred: true` is not decoration. **No venue quoted this price.** It is the
+ratio of two amounts in one transaction, and the two parties may have agreed it
+hours earlier, off-chain, at a level unrelated to any market. A count of
+settlements is a hard fact; the level any one of them printed at is a
+reconstruction, and anything displaying it should say so.
 
 ### Guard a Chainlink price round
 
@@ -275,6 +371,7 @@ Runnable scripts in [`examples/`](examples/):
 - [`watch-bridge.mts`](examples/watch-bridge.mts) — recent canonical ERC-20 deposits, with each token's actual decimals
 - [`scan-pools.mts`](examples/scan-pools.mts) — V2/V3/V4 discovery from verified deployment addresses, with streaming and resume bounds
 - [`market-session.mts`](examples/market-session.mts) — report regular-session context without claiming oracle freshness
+- [`stock-token-transfers.mts`](examples/stock-token-transfers.mts) — read a stock token's ERC-8056 multiplier from live logs and spot where a corporate action landed
 - [`oracle-guard.mts`](examples/oracle-guard.mts) — read a live feed and fail closed on unknown sequencer or pause state
 - [`preflight-transaction.mts`](examples/preflight-transaction.mts) — simulate and risk-check a native transfer without a signer or send call
 - [`preflight-erc20-transfer.mts`](examples/preflight-erc20-transfer.mts) — decode and approve a safe ERC-20 transfer plan using deterministic evidence
@@ -289,6 +386,7 @@ cd examples && npm i
 V2_FACTORIES=0x... V3_FACTORIES=0x... V4_POOL_MANAGERS=0x... npx tsx scan-pools.mts
 ETHEREUM_RPC_URL=https://your-rpc.example npx tsx watch-bridge.mts
 npx tsx oracle-guard.mts # defaults to unknown pause/sequencer state and fails closed
+STOCK_TOKEN=0x... npx tsx stock-token-transfers.mts
 FROM_ADDRESS=0x... TO_ADDRESS=0x... npx tsx preflight-transaction.mts
 npm run preflight:erc20
 npm run preflight:approval-risk
