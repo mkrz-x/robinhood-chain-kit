@@ -129,8 +129,45 @@ jobs:
       #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Provenance still works — it is the `id-token: write` above that earns
       # it, not the auth method.
+      #
+      # A duplicate is the one failure here that is not a failure. While
+      # trusted publishing is unavailable the release goes out by hand and the
+      # tag is pushed after, so this job arrives at a version that already
+      # exists. That is worse than noise: the run dies red before the GitHub
+      # Release step, and the tag is left with no release against it.
+      #
+      # The pre-flight gate above cannot catch it. npm's read path is served
+      # from a replica and lags the write path — on the v0.7.0 run the gate
+      # asked at 18:13:33 and was told the version did not exist, and `npm
+      # publish` was told at 18:14:09 that it did.
+      #
+      # So forgiveness is earned, not assumed: the registry must confirm the
+      # version AND its tarball checksum must equal the one this run just
+      # built. Identical bytes mean the release really is complete and only the
+      # bookkeeping is missing. A mismatch means something else was published
+      # under this version, which is the loudest failure this file has.
       - name: publish to npm
-        run: npm publish
+        run: |
+          if npm publish; then
+            echo "published $NAME@$VERSION"
+            exit 0
+          fi
+          published="$(npm view "$NAME@$VERSION" dist.shasum 2>/dev/null || true)"
+          if [ -z "$published" ]; then
+            echo "::error::publish failed and $NAME@$VERSION is not on the registry"
+            exit 1
+          fi
+          # --ignore-scripts: `verify` already built dist, and prepack would
+          # print its build log into the JSON about to be parsed
+          built="$(npm pack --dry-run --json --ignore-scripts 2>/dev/null \
+            | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].shasum")"
+          if [ "$published" != "$built" ]; then
+            echo "::error::$NAME@$VERSION is on the registry with a DIFFERENT tarball"
+            echo "::error::registry $published, built here $built — do not release this tag"
+            exit 1
+          fi
+          echo "::warning::$NAME@$VERSION was already published, byte-identical to this build"
+          echo "::warning::skipping publish and continuing to the GitHub Release"
 
       - name: github release
         env:
