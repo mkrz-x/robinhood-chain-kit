@@ -483,6 +483,14 @@ npm run preflight:swap
 
 - Unit-tested (`npm test`), package-linted, example-type-checked, and CI-tested at the Node 20.3 floor and on Node 22.
 - `npm run verify` runs the build, unit, package-resolution, and example checks.
+- **Releases are published by hand and attested by CI.** `npm run release` runs
+  every gate and then publishes; pushing the matching `v*` tag starts a workflow
+  that rebuilds the tag's tree from scratch and fails unless the tarball npm is
+  serving is **byte-identical** to it. That catches what a manual release
+  actually gets wrong — a dirty tree, a stale `dist/`, the wrong branch — which
+  publishing from CI never checked either. Versions carry no npm provenance
+  attestation: trusted publishing was rejected on two attempts and none of the
+  earlier versions had one to lose.
 - Contract addresses come from the [official chain docs](https://docs.robinhood.com/chain/) — verify independently before moving value.
 - This is an independent, unofficial community project. Not affiliated with or endorsed by Robinhood.
 

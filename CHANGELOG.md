@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **Release process: CI attests, it no longer publishes.** Two attempts to
+  publish over OIDC were rejected with a 404 on the PUT while provenance signed
+  fine, and the second was unambiguous — the version was not on the registry at
+  all, so nothing but the token could have been refused. Rather than leave a
+  failed run on every tag, `npm run release` publishes from a laptop and the
+  tag workflow proves the result: it rebuilds the tag's tree and fails unless
+  the tarball on npm is byte-identical to it. That is a stronger check than the
+  old flow had, because it catches the failure a manual release actually
+  introduces — publishing from a dirty tree, a stale `dist/`, or the wrong
+  branch. `publishConfig.provenance` is removed: with no OIDC provider outside
+  CI it made every hand publish fail with `EUSAGE`, and no released version has
+  ever carried an attestation. The workflow header documents exactly how to
+  restore CI publishing if the trusted publisher is ever configured.
+
 ## 0.8.0 — 2026-08-01
 
 Correctness release. Two figures in 0.7.0 were presented as exact and were

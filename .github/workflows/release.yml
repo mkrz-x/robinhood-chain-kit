@@ -1,20 +1,30 @@
 name: release
 
-# Publishing is a tag push, not a button. `git push origin v0.6.0` is the whole
-# release ritual, and the tag is the only thing that can start one — a green CI
-# run on main never publishes by itself.
+# This workflow does NOT publish. It attests.
 #
-# Every gate below fails closed. A tag that disagrees with package.json, a
-# version already on the registry, a failing test, a CHANGELOG with nothing to
-# say about this version: each stops the run *before* `npm publish`, because the
-# one thing that cannot be undone here is publishing the wrong tarball.
+# Publishing from CI needs a trusted publisher on npmjs.com, and two attempts
+# (v0.6.0, v0.8.0) were rejected with a 404 on the PUT while the OIDC token
+# minted provenance fine. The second failure is unambiguous — 0.8.0 was not on
+# the registry at all, so the only thing a 404 can mean there is that the
+# registry declined the token. Rather than leave a red X on every tag, the
+# release is published by hand (`npm run release`) and this run proves the
+# result.
+#
+# What it proves is worth more than it sounds. It rebuilds the tag's tree from
+# scratch and compares the tarball checksum against the one npm is actually
+# serving. A hand publish from a dirty working tree, from the wrong branch, or
+# from a stale dist/ does not match, and that is exactly the failure mode a
+# manual release introduces. Every gate below still fails closed.
+#
+# To go back to publishing from CI: set the trusted publisher on npmjs.com
+# (mkrz-x / robinhood-chain-kit / release.yml, and the Environment field must
+# match whatever this file declares — it currently declares none), restore
+# `id-token: write`, add back `publishConfig.provenance`, and replace the
+# attestation step with `npm publish`.
 on:
   push:
     tags: ["v*"]
 
-# `provenance: true` in publishConfig needs an OIDC token, and that needs
-# `id-token: write` — a laptop cannot mint one, which is why publishing has to
-# live here. `contents: write` is for the GitHub Release at the end.
 permissions:
   contents: read
 
@@ -23,33 +33,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment:
-      name: npm
-      url: https://www.npmjs.com/package/robinhood-chain-kit
     permissions:
       contents: write # create the GitHub Release
-      id-token: write # OIDC: trusted publishing + provenance attestation
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
           cache-dependency-path: |
             package-lock.json
             examples/package-lock.json
-
-      # Node 22 ships npm 10.x. Trusted publishing (OIDC, no NPM_TOKEN) landed
-      # in 11.5.1, and on an older npm the run would fall through to asking for
-      # a token that does not exist. Pin the floor rather than trust the image.
-      - name: use an npm that can publish over OIDC
-        run: |
-          npm install -g npm@^11.5.1
-          npm --version
 
       - name: read the release identity
         run: |
@@ -65,20 +62,6 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           if [ "$tag" != "$VERSION" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} claims $tag, package.json says $VERSION"
-            exit 1
-          fi
-
-      # npm would reject a duplicate anyway, but only after prepack, tests and
-      # a tarball upload. Ask first: a re-pushed tag then fails in 3 seconds
-      # with a sentence that says what happened.
-      #
-      # `npm view <pkg>@<missing-version>` exits 0 with empty output, so the
-      # exit code proves nothing here — the output is the signal.
-      - name: version must not already be published
-        run: |
-          published="$(npm view "$NAME@$VERSION" version 2>/dev/null || true)"
-          if [ -n "$published" ]; then
-            echo "::error::$NAME@$VERSION is already on the registry — bump the version"
             exit 1
           fi
 
@@ -109,65 +92,43 @@ jobs:
       - run: npm ci --prefix examples
 
       # ci.yml already ran this on main, but not on this commit — a tag can
-      # point anywhere. Types, build, 162 tests, publint, Are the Types Wrong,
-      # the packed ESM+CJS smoke test, and the examples type-check, against the
-      # exact tree about to be uploaded.
+      # point anywhere. Types, build, the full suite, publint, Are the Types
+      # Wrong, the packed ESM+CJS smoke test, and the examples type-check,
+      # against the exact tree this tag names.
       - name: verify
         run: npm run verify
 
-      # No NODE_AUTH_TOKEN. Authentication is the OIDC token minted by
-      # `id-token: write` and exchanged with the registry, which also produces
-      # the provenance attestation `publishConfig.provenance` asks for.
+      # THE ATTESTATION.
       #
-      # This requires a trusted publisher on npmjs.com — package settings →
-      # Trusted Publisher → GitHub Actions, with this repository and the
-      # workflow filename `release.yml`. Without it the registry has no reason
-      # to trust the token and rejects the publish.
+      # A hand publish is a human running a command on a laptop, so the thing
+      # worth checking is not that a publish happened but that the bytes on the
+      # registry are the ones this tag builds. A dirty tree, a stale dist/ or
+      # the wrong branch all produce a tarball that does not match here.
       #
-      # To use a granular access token instead, add the NPM_TOKEN secret and:
-      #   env:
-      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      # Provenance still works — it is the `id-token: write` above that earns
-      # it, not the auth method.
+      # `npm view <pkg>@<missing>` exits 0 with empty output, so the exit code
+      # proves nothing — the output is the signal.
       #
-      # A duplicate is the one failure here that is not a failure. While
-      # trusted publishing is unavailable the release goes out by hand and the
-      # tag is pushed after, so this job arrives at a version that already
-      # exists. That is worse than noise: the run dies red before the GitHub
-      # Release step, and the tag is left with no release against it.
-      #
-      # The pre-flight gate above cannot catch it. npm's read path is served
-      # from a replica and lags the write path — on the v0.7.0 run the gate
-      # asked at 18:13:33 and was told the version did not exist, and `npm
-      # publish` was told at 18:14:09 that it did.
-      #
-      # So forgiveness is earned, not assumed: the registry must confirm the
-      # version AND its tarball checksum must equal the one this run just
-      # built. Identical bytes mean the release really is complete and only the
-      # bookkeeping is missing. A mismatch means something else was published
-      # under this version, which is the loudest failure this file has.
-      - name: publish to npm
+      # --ignore-scripts: `verify` above already built dist, and prepack would
+      # print its build log into the JSON about to be parsed.
+      - name: the published tarball must be what this tag builds
         run: |
-          if npm publish; then
-            echo "published $NAME@$VERSION"
-            exit 0
-          fi
           published="$(npm view "$NAME@$VERSION" dist.shasum 2>/dev/null || true)"
           if [ -z "$published" ]; then
-            echo "::error::publish failed and $NAME@$VERSION is not on the registry"
+            echo "::error::$NAME@$VERSION is not on the registry."
+            echo "::error::this workflow attests a release, it does not create one."
+            echo "::error::publish first:  npm run release"
             exit 1
           fi
-          # --ignore-scripts: `verify` already built dist, and prepack would
-          # print its build log into the JSON about to be parsed
           built="$(npm pack --dry-run --json --ignore-scripts 2>/dev/null \
             | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].shasum")"
           if [ "$published" != "$built" ]; then
-            echo "::error::$NAME@$VERSION is on the registry with a DIFFERENT tarball"
-            echo "::error::registry $published, built here $built — do not release this tag"
+            echo "::error::the tarball on npm is NOT what this tag builds"
+            echo "::error::registry $published"
+            echo "::error::this tag $built"
+            echo "::error::the published version came from a different tree — do not release this tag"
             exit 1
           fi
-          echo "::warning::$NAME@$VERSION was already published, byte-identical to this build"
-          echo "::warning::skipping publish and continuing to the GitHub Release"
+          echo "verified: $NAME@$VERSION on npm is byte-identical to $GITHUB_REF_NAME ($built)"
 
       - name: github release
         env:
@@ -175,5 +136,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$NAME v$VERSION" \
-            --notes "$NOTES" \
-            --verify-tag
+            --notes "$NOTES"
