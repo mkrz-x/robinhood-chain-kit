@@ -21,6 +21,13 @@ export const TESTNET_BLOCKSCOUT_API_V2_URL = `${TESTNET_EXPLORER_URL}/api/v2`;
 
 export const MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
+/**
+ * Robinhood's own registry of tokenized-equity deployments on chain 4663 —
+ * symbol, name, contract address, decimals, ISIN, and a multiplier snapshot
+ * per asset. This is the address book `loadStockTokenDirectory` parses.
+ */
+export const RHJ_ASSETS_URL = "https://api.robinhood.com/rhj/assets";
+
 /** viem-compatible mainnet definition (no viem runtime dependency required). */
 export const robinhoodChain = {
   id: CHAIN_ID,

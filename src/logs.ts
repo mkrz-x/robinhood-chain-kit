@@ -47,10 +47,25 @@ export interface PagedLogsOpts<T> {
   signal?: AbortSignal;
 }
 
-const defaultIsRateLimit = (err: unknown): boolean =>
+/**
+ * The rate-limit classifier `getLogsPaged` uses when `isRateLimit` is not
+ * supplied. Exported so a caller can EXTEND it rather than replace it —
+ * `isRateLimit: (err) => defaultIsRateLimit(err) || myProviderSaysSlowDown(err)`
+ * — because replacing it silently drops the 429 handling this module was
+ * built around.
+ */
+export const defaultIsRateLimit = (err: unknown): boolean =>
   /\b429\b|too many requests/i.test(err instanceof Error ? err.message : String(err));
 
-const RANGE_TOO_LARGE_PATTERNS = [
+/**
+ * The provider error shapes recognized as "this window is too big", collected
+ * from real RPC responses. Exported (frozen) so a caller hitting a provider
+ * with a novel message can extend the classification instead of rebuilding
+ * it: an unrecognized size error is FATAL by design — misclassifying a fatal
+ * error as a size error would shrink-and-retry forever — so the fix for a new
+ * provider is to add its pattern, not to loosen the default.
+ */
+export const DEFAULT_RANGE_TOO_LARGE_PATTERNS: readonly RegExp[] = Object.freeze([
   /\b(?:block )?range (?:is )?too (?:large|wide)\b/i,
   /\b(?:exceeds?|exceeded) (?:the )?(?:maximum|max|provider) (?:allowed )?(?:block )?range\b/i,
   /\b(?:maximum|max) (?:allowed )?(?:block )?range (?:is|of) [\d,]+\b/i,
@@ -60,11 +75,12 @@ const RANGE_TOO_LARGE_PATTERNS = [
   /\blogs matched by query exceeds? (?:the )?limit(?: of [\d,]+)?\b/i,
   /\bresults? exceeds? (?:the )?(?:maximum|max|provider) (?:allowed )?(?:limit|count)\b/i,
   /\blimit of [\d,]+ (?:logs?|results?)\b/i,
-];
+]);
 
-const defaultIsRangeTooLarge = (err: unknown): boolean => {
+/** The size classifier built from {@link DEFAULT_RANGE_TOO_LARGE_PATTERNS}. */
+export const defaultIsRangeTooLarge = (err: unknown): boolean => {
   const message = err instanceof Error ? err.message : String(err);
-  return RANGE_TOO_LARGE_PATTERNS.some((pattern) => pattern.test(message));
+  return DEFAULT_RANGE_TOO_LARGE_PATTERNS.some((pattern) => pattern.test(message));
 };
 
 const defaultSleep = (ms: number, signal?: AbortSignal) =>

@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.9.0 — 2026-08-24
+
+The kit meets viem where developers are, and every fail-closed door gets an
+on-ramp. 0.8.x shipped three flagship fail-closed designs — Oracle Guard,
+ERC-8056 reads, transaction preflight — and, an audit found, no way to feed
+any of them: call descriptors were exported but nothing executed them,
+`assessOracleHealth` demanded sequencer and pause state the kit gave you no
+way to obtain, and the preflight adapter's ten methods had no shipped binding.
+This release closes those gaps without breaking anything: a pure minor, and
+the core still has zero runtime dependencies.
+
+### Added
+
+- **`robinhood-chain-kit/viem`** — the one entry that speaks viem, with viem
+  imported as **types only** (the emitted JS contains no viem import, so the
+  new optional peer stays truly optional). `robinhoodChainActions()` for
+  `.extend()`: `getScaledUiMultiplierState`, `getStockDirectory`,
+  `getOracleHealth`, and `getEquityQuote`, which composes registry → feed →
+  round → multiplier → pause → session into one quote.
+  `createViemPreflightAdapter(client)` is the shipped
+  `TransactionPreflightAdapter` binding; it deliberately omits
+  `resolveContract`/`resolveAsset` rather than fabricate `verified: true`
+  evidence an RPC cannot know.
+- **Subpath exports** `./viem`, `./erc8056`, `./oracle`, `./preflight`, each
+  with types-first ESM and CJS conditions, so guarding a price no longer
+  drags the preflight engine into a bundle. The root keeps re-exporting
+  everything else, unchanged.
+- **`MinimalPublicClient`** (`src/client.ts`) — the structural client the
+  executed readers take. Any viem `PublicClient` satisfies it without the kit
+  importing viem; `executeContractCalls` batches through `multicall` when
+  present (chunked at 300 calls) and falls back to sequential reads when the
+  method is absent, rejects wholesale, or returns a misaligned result —
+  misalignment being the silent-wrong-answer case, since slot N would read as
+  call N+1's value.
+- **Executed readers**: `readScaledUiMultiplierState(s)` run the three
+  authoritative ERC-8056 reads and return typed bigints plus the resolved
+  schedule; `readOraclePauseState` reads `oraclePaused()` on the token —
+  documented on the official oracles page, verified by `eth_call` on chain
+  4663, and mapped fail-closed to `"unknown"` on any revert (a plain ERC-20
+  reverts on the selector, and USDG did); `readOracleRound(s)` execute and
+  normalize `latestRoundData()`; `readSequencerUptime` reads an AggregatorV3
+  uptime feed (0 = up, 1 = down, anything else or a revert = `"unknown"`);
+  and `checkOracleHealth` gathers round + pause + sequencer in one call and
+  hands them to the unchanged fail-closed assessment. **No sequencer uptime
+  feed address ships**: none for chain 4663 could be verified in the live
+  Chainlink directory, and an unverified address baked into a package is the
+  exact class of silent wrong answer this kit exists to prevent.
+- **The stock-token registry** (`src/registry.ts`): `loadStockTokenDirectory`
+  parses Robinhood's own `api.robinhood.com/rhj/assets` with the same trust
+  boundary as the Chainlink loader — atomic parsing where one malformed row
+  rejects the document, optional byte-level `expectedSha256` pinning,
+  injectable fetch — with the schema taken from the live payload (194 assets
+  read and checked), not from documentation that does not exist.
+  `findStockToken` looks up by ticker or address; `RHJ_ASSETS_URL` is
+  exported from `chain`. **`USDG_ADDRESS` / `USDG_DECIMALS`** ship verified:
+  `eth_call` on chain 4663 answered name "Global Dollar", symbol "USDG",
+  decimals 6 at `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`, and the chain's
+  Blockscout lists that deployment as verified with live market data while
+  the several same-name copycats are unverified with round 1e27 supplies.
+- **DvP leg builders**: `settlementLegFromScaledUiLog` and
+  `settlementLegFromTransferLog` convert decoded logs into `SettlementLeg`s —
+  the boilerplate every `pairDeliveryVersusPayment` caller hand-wrote, with
+  its two recurring mistakes designed out (uiValue where the raw value
+  belongs; uiValue dropped and lost to UI pricing). Strict validation throws
+  on malformed input, because a leg that silently fails to pair is worse than
+  one that errors.
+- **Premium math where people can find it** (`src/premium.ts`, also on
+  `./oracle`): `underlyingSharePrice` encodes the official docs' direction —
+  the feed prices the TOKEN, multiplier included, and the share price is
+  `feedPrice * 1e18 / uiMultiplier()`, quoted from the docs in the source —
+  plus `formatUnderlyingSharePrice`, signed `premiumBps`, and
+  `computePriceDeviationBps`/`computeSignedPriceDeviationBps`. The deviation
+  arithmetic moved to a shared pure module so `./oracle` offers it without
+  the preflight engine; preflight's `calculatePriceDeviationBps` now
+  delegates to it, byte-for-byte the same results.
+- **`nextUsEquitySessionChange(ts)`** — the exact epoch of the next scheduled
+  session boundary and which way it flips, holiday- and early-close-aware,
+  using the same calendar as `getUsEquityMarketSession`.
+- **`oraclePaused` joined `ERC8056_ABI`** with a `deployed-call` verification
+  entry, evidence documented in the member's note.
+- **Formerly private utilities, exported**: `sha256Hex` (compute your own
+  directory pins), `DEFAULT_RANGE_TOO_LARGE_PATTERNS`, `defaultIsRateLimit`
+  and `defaultIsRangeTooLarge` (extend the classifiers instead of replacing
+  them), `KNOWN_ERC20_SELECTORS`, and `MAX_UINT256`.
+- **`llms.txt`** in the package root: every export, one line each, grouped by
+  module and marked `[pure]`/`[network]`, for token-budgeted contexts.
+- Examples: `equity-quote.mts`, `oracle-health-live.mts`,
+  `viem-preflight.mts`, and a rewritten learning-order table.
+
+### Changed
+
+- **viem becomes an optional peer** (`peerDependenciesMeta.optional`), used
+  by the `/viem` entry and only for types. Consumers without viem see no
+  install change and no runtime change.
+- `getChainlinkRoundDataCalls` accepts `Pick<ChainlinkFeed, "proxyAddress">`,
+  a safe widening so executed readers can pass a bare address.
+- The build is multi-entry (tsup) and `attw` runs the node16 profile: the
+  package requires Node ≥ 20.3, and the node10 resolution mode it drops was
+  the only thing standing between the subpaths and a green check.
+- `verify-live` now exercises the whole new surface against mainnet: parses
+  the live registry, reads AAPL's multiplier and pause flag, confirms USDG's
+  decimals on-chain, runs `checkOracleHealth`, and extends a real viem client
+  through `getEquityQuote`.
+- README: the five-line viem quickstart leads, followed by a
+  which-functions-touch-the-network table and the on-ramp sections. The
+  failure-mode prose is unchanged.
+
+### Fixed
+
+- Nothing existing broke, and nothing existing changed behaviour. Every 0.8.x
+  export, including both deprecated functions, is intact — this is a pure
+  minor.
+
 ## 0.8.1 — 2026-08-01
 
 - **Release process: CI attests, it no longer publishes.** Two attempts to

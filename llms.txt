@@ -1,0 +1,116 @@
+# robinhood-chain-kit
+
+Typed building blocks for Robinhood Chain (Arbitrum Orbit L2, chain id 4663). Zero runtime
+dependencies; viem is an OPTIONAL peer used only by the `robinhood-chain-kit/viem` entry, and
+only for types. Subpath entries: `/viem`, `/erc8056`, `/oracle`, `/preflight`; the root exports
+everything except the viem entry. Markers: [pure] = no I/O; [network] = performs fetch/RPC via a
+supplied client or fetch. Amounts are bigint throughout; prices format via exact decimal strings.
+
+## chain (constants)
+- CHAIN_ID 4663 / TESTNET_CHAIN_ID 46630 [pure]
+- RPC_URL, SEQUENCER_FEED_WS, SEQUENCER_URL, EXPLORER_URL, EXPLORER_API_URL, BLOCKSCOUT_API_V2_URL (+ TESTNET_* variants) [pure]
+- RHJ_ASSETS_URL — Robinhood's stock-token registry endpoint [pure]
+- MULTICALL3_ADDRESS [pure]
+- robinhoodChain / robinhoodTestnetChain / ROBINHOOD_CHAINS / getRobinhoodChain(network) — viem-compatible chain objects, no viem import [pure]
+
+## client (structural client, zero-dep)
+- MinimalPublicClient — { readContract, multicall? }; any viem PublicClient satisfies it structurally [pure]
+- MinimalContractCall / MinimalMulticallResult — viem-shaped call and result types [pure]
+- executeContractCalls(client, calls) — multicall-chunked with sequential fallback; per-call failures stay in their slots [network]
+- describeCallFailure(result) — bounded error text for a failed slot [pure]
+
+## stocktokens / erc8056 (also `robinhood-chain-kit/erc8056`)
+- TRANSFER_WITH_SCALED_UI_EVENT / TRANSFER_WITH_SCALED_UI_TOPIC0 — the event deployed contracts ACTUALLY emit (not the EIP's name) [pure]
+- ERC8056_SPEC_EVENT_NAME / ERC8056_SPEC_TOPIC0 — the spec's name and its useless topic, exported so the trap is assertable [pure]
+- UIMULTIPLIER_UPDATED_EVENT / UIMULTIPLIER_UPDATED_TOPIC0 — announces a SCHEDULED change, may repeat [pure]
+- ERC20_TRANSFER_EVENT [pure]
+- ERC8056_ABI — reads uiMultiplier/newUIMultiplier/effectiveAt/oraclePaused + both events, all verified on chain 4663 [pure]
+- ERC8056_VERIFICATION — per-member provenance ("deployed-call" | "deployed-logs") [pure]
+- getErc8056ReadCalls(token) — the three authoritative multiplier read calls [pure]
+- SCALED_UI_DECIMALS / SCALED_UI_ONE — multiplier fixed-point scale (1e18) [pure]
+- estimateScaledUiMultiplier(transfer) — exact feasible interval from one transfer; midpoint is display-only [pure]
+- readScaledUiMultiplier(transfer) — @deprecated, use the estimate [pure]
+- toUiAmount(raw, multiplier) / toRawAmount(ui, multiplier) — raw <-> displayed conversion [pure]
+- formatScaledUiMultiplier(multiplier) — exact decimal string [pure]
+- compareScaledUiMultiplier(prev, curr, opts?) — corporate-action direction from AUTHORITATIVE readings [pure]
+- compareScaledUiEstimates(prev, curr) — change proven only when intervals are disjoint [pure]
+- resolveScaledUiMultiplier(state, now) — none | applied | pending | due; never promotes the pending value [pure]
+- pairDeliveryVersusPayment({stockLegs, cashLegs}) — P2P trade reconstruction, fails closed hard [pure]
+- settlementLegFromScaledUiLog(log) — decoded TransferWithScaledUI -> stock leg (keeps uiValue) [pure]
+- settlementLegFromTransferLog(log) — decoded ERC-20 Transfer -> cash leg [pure]
+- inferRawSettlementPrice(input) — cash per RAW token unit, exact [pure]
+- inferUiSettlementPrice(input) — cash per DISPLAYED share; requires uiValue XOR authoritative multiplier [pure]
+- inferSettlementPrice(input) — @deprecated raw-unit pricing [pure]
+
+## erc8056 executed readers (root + `/erc8056`)
+- readScaledUiMultiplierState(client, token, opts?) — executes the three reads, returns bigints + resolved schedule [network]
+- readScaledUiMultiplierStates(client, tokens, opts?) — batched, multicall-chunked, per-token failures isolated [network]
+- readOraclePauseState(client, token) — oraclePaused() on the TOKEN; revert/absence -> "unknown" (fail-closed), never throws on-chain conditions [network]
+
+## registry (root + `/erc8056`)
+- USDG_ADDRESS / USDG_DECIMALS — Global Dollar on chain 4663, verified by eth_call + Blockscout [pure]
+- parseStockTokenDirectory(value, opts?) — atomic strict parse of the RHJ assets payload [pure]
+- loadStockTokenDirectory(opts?) — fetch + atomic parse; optional expectedSha256 byte pin; injectable fetch [network]
+- findStockToken(directory, symbolOrAddress) — case-insensitive symbol or address lookup [pure]
+
+## feeds / Oracle Guard (also `robinhood-chain-kit/oracle`)
+- CHAINLINK_FEED_DIRECTORY_URL / CHAINLINK_AGGREGATOR_V3_ABI [pure]
+- parseChainlinkFeedDirectory(value) — atomic strict parse [pure]
+- loadChainlinkFeedDirectory(opts?) — fetch + atomic parse; optional expectedSha256 byte pin [network]
+- findChainlinkFeedByAddress(feeds, address) / findChainlinkFeeds(feeds, query) [pure]
+- getChainlinkRoundDataCalls(feeds) — latestRoundData call objects [pure]
+- normalizeChainlinkRoundData(tuple) — AggregatorV3 tuple -> named round [pure]
+- formatChainlinkAnswer(answer, decimals) — exact decimal string, no floats [pure]
+- assessOracleHealth(input) — fail-closed round/sequencer/pause verdict; unknown is unusable [pure]
+- sha256Hex(bytes) — WebCrypto SHA-256 hex, for computing directory pins [pure]
+
+## oracle executed readers (root + `/oracle`)
+- readOracleRound(client, feedOrAddress) — executes latestRoundData, normalized [network]
+- readOracleRounds(client, feeds) — batched, per-feed failures isolated [network]
+- readSequencerUptime(client, aggregatorAddress, opts?) — 0=up/1=down + startedAt; anything else "unknown". No feed address is shipped for 4663 because none could be verified [network]
+- checkOracleHealth(client, {feed, token?, pauseState?, sequencerFeed?, sequencer?, ...}) — gathers round + pause + sequencer and assesses in one call [network]
+
+## premium (root + `/oracle`)
+- underlyingSharePrice(feedAnswer, feedDecimals, uiMultiplier) — feed prices the TOKEN; share = answer * 1e18 / multiplier (docs' direction) [pure]
+- formatUnderlyingSharePrice(...) — same, as exact decimal string [pure]
+- premiumBps({dexOrSettlementPrice, oraclePrice}) — signed venue-vs-oracle premium, unit-honest [pure]
+- computePriceDeviationBps(reference, observed) — exact absolute bps, ceiling-rounded; same function as preflight's calculatePriceDeviationBps [pure]
+- computeSignedPriceDeviationBps(reference, observed) [pure]
+
+## markethours
+- getUsEquityMarketSession(ts) — DST/holiday/early-close-aware regular-session context [pure]
+- isUsEquityMarketOpen(ts) [pure]
+- nextUsEquitySessionChange(ts) — { at, to: "open"|"closed" }, next scheduled boundary [pure]
+- isFeedFresh(updatedAt, heartbeat, now?, grace?) — heartbeat freshness, independent of the session (feeds are 24/5) [pure]
+
+## logs
+- getLogsPaged(getLogs, from, to, opts?) — adaptive backfill: size errors halve, 429s cool off, spans re-grow after clean passes [network]
+- DEFAULT_RANGE_TOO_LARGE_PATTERNS — recognized "window too big" provider messages, extend rather than replace [pure]
+- defaultIsRateLimit(err) / defaultIsRangeTooLarge(err) — the default classifiers, exported to extend [pure]
+
+## retryfetch
+- fetchWithRetry(url, init, opts) — per-attempt timeouts, Retry-After + jittered backoff, safe-method-only retries by default [network]
+
+## preflight / Transaction Firewall (also `robinhood-chain-kit/preflight`)
+- inspectTransaction(request, {adapter, policy?, market?, decodeAction?}) — evidence-based verdict safe|blocked|unknown; plans withheld unless safe; never signs or sends [network]
+- normalizeTransactionRequest(request) / decodeTransactionAction(request) [pure]
+- calculatePriceDeviationBps(reference, observed) — delegate of computePriceDeviationBps [pure]
+- KNOWN_ERC20_SELECTORS — the selectors the built-in decoder handles [pure]
+- MAX_UINT256 — the unlimited-approval sentinel [pure]
+- TransactionPreflightAdapter — the 10-method read-only evidence interface (implement or use the viem binding) [pure]
+
+## bridge
+- PROTOCOL_CONTRACTS — documented mainnet/testnet L1+L2 deployments [pure]
+- ARBITRUM_PRECOMPILES [pure]
+- L1_BRIDGE, L1_DELAYED_INBOX, L1_SEQUENCER_INBOX, L1_OUTBOX, L1_ROLLUP, L1_GATEWAY_ROUTER, L1_ERC20_GATEWAY, L1_CUSTOM_GATEWAY, L1_WETH_GATEWAY, L1_GATEWAYS [pure]
+- DEPOSIT_INITIATED_EVENT / WITHDRAWAL_FINALIZED_EVENT [pure]
+
+## dex
+- V2_PAIR_CREATED_EVENT, V3_POOL_CREATED_EVENT, V2_SWAP_EVENT, V3_SWAP_EVENT, V4_INITIALIZE_EVENT, V4_SWAP_EVENT, DEX_EVENTS [pure]
+- V4_NATIVE_CURRENCY — address(0) is the native asset in V4 pools [pure]
+- DEX_SWAP_ACTOR_FIELDS — explicit caller/recipient roles; no field alone is "the swapper" [pure]
+- getDexDiscoveryTargets(deployments) — address-scoped discovery from VERIFIED factories/PoolManagers [pure]
+
+## viem entry (`robinhood-chain-kit/viem` only; viem optional peer, types-only import)
+- robinhoodChainActions(opts?) — for client.extend(): getScaledUiMultiplierState, getStockDirectory, getOracleHealth, getEquityQuote (directory -> feed -> round -> pause -> session composed) [network]
+- createViemPreflightAdapter(client) — TransactionPreflightAdapter over a viem PublicClient; identity resolution deliberately omitted rather than fabricated [network]

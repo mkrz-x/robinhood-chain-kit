@@ -4,6 +4,9 @@
  */
 import { CHAIN_ID, TESTNET_CHAIN_ID } from "./chain.js";
 import type { OracleHealthAssessment } from "./feeds.js";
+import { computePriceDeviationBps, type PriceValue } from "./deviation.js";
+
+export type { PriceValue };
 
 export type EvmAddress = `0x${string}`;
 export type HexData = `0x${string}`;
@@ -247,11 +250,6 @@ export interface MarketObservation extends MarketPair {
   observedAtSeconds: number;
 }
 
-export interface PriceValue {
-  value: bigint;
-  decimals: number;
-}
-
 export interface ExactPrice extends MarketObservation, PriceValue {}
 
 export interface BasisPointObservation extends MarketObservation {
@@ -407,7 +405,8 @@ export interface InspectTransactionOptions {
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const HEX_DATA = /^0x(?:[0-9a-fA-F]{2})*$/;
-const MAX_UINT256 = (1n << 256n) - 1n;
+/** 2^256 - 1: the unlimited-approval sentinel and the uint256 ceiling. */
+export const MAX_UINT256 = (1n << 256n) - 1n;
 const MAX_CUSTOM_REQUIREMENTS = 32;
 const SELECTORS = {
   approve: "0x095ea7b3",
@@ -415,6 +414,16 @@ const SELECTORS = {
   transferFrom: "0x23b872dd",
   setApprovalForAll: "0xa22cb465",
 } as const;
+
+/**
+ * The selectors the built-in decoder recognizes, keyed by function name.
+ *
+ * Exported so a custom `decodeAction` can check whether a selector is one the
+ * firewall already handles — a custom decoder is only consulted for
+ * `unknown-contract-call`, so re-describing these here is dead code, and the
+ * silent version of that mistake is a decoder that never runs.
+ */
+export const KNOWN_ERC20_SELECTORS: Readonly<typeof SELECTORS> = Object.freeze({ ...SELECTORS });
 
 const emptyRequirements = () => ({
   tokenBalanceRequirements: [] as TokenBalanceRequirement[],
@@ -1100,20 +1109,16 @@ const validateMarketContext = (
 /**
  * Exact, ceiling-rounded absolute deviation in basis points. Different decimal
  * scales are cross-multiplied; no floating-point conversion is used.
+ *
+ * Delegates to `computePriceDeviationBps` (also exported from
+ * `robinhood-chain-kit/oracle`), which is the same function without the rest
+ * of this module attached; both names remain supported.
  */
 export function calculatePriceDeviationBps(
   reference: PriceValue,
   observed: PriceValue,
 ): bigint {
-  const left = normalizePriceValue(reference, "reference");
-  const right = normalizePriceValue(observed, "observed");
-  const referenceScaled = left.value * 10n ** BigInt(right.decimals);
-  const observedScaled = right.value * 10n ** BigInt(left.decimals);
-  const difference =
-    referenceScaled >= observedScaled
-      ? referenceScaled - observedScaled
-      : observedScaled - referenceScaled;
-  return (difference * 10_000n + referenceScaled - 1n) / referenceScaled;
+  return computePriceDeviationBps(reference, observed);
 }
 
 const adapterMethods = [

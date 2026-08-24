@@ -3,15 +3,28 @@ import {
   CHAIN_ID,
   EXPLORER_API_URL,
   PROTOCOL_CONTRACTS,
+  RHJ_ASSETS_URL,
   RPC_URL,
   TESTNET_BLOCKSCOUT_API_V2_URL,
   TESTNET_CHAIN_ID,
   TESTNET_EXPLORER_API_URL,
   TESTNET_RPC_URL,
   CHAINLINK_FEED_DIRECTORY_URL,
+  USDG_ADDRESS,
+  USDG_DECIMALS,
+  checkOracleHealth,
   fetchWithRetry,
+  findChainlinkFeeds,
+  findStockToken,
   parseChainlinkFeedDirectory,
+  parseStockTokenDirectory,
+  readOraclePauseState,
+  readScaledUiMultiplierState,
+  robinhoodChain,
+  underlyingSharePrice,
 } from "../dist/index.js";
+import { robinhoodChainActions } from "../dist/viem.js";
+import { createPublicClient, http } from "viem";
 import {
   validateBlockscoutStats,
   validateEtherscanBlockNumber,
@@ -93,6 +106,64 @@ console.log("Blockscout Etherscan-compatible and REST endpoints verified");
 
 const feeds = parseChainlinkFeedDirectory(await requestJson(CHAINLINK_FEED_DIRECTORY_URL));
 
-const assets = await requestJson("https://api.robinhood.com/rhj/assets");
-assert(Array.isArray(assets.assets) && assets.assets.length > 0, "RHJ assets response is malformed");
-console.log(`${feeds.length} Chainlink feeds and ${assets.assets.length} RHJ assets verified`);
+const directory = parseStockTokenDirectory(await requestJson(RHJ_ASSETS_URL));
+assert(directory.length > 0, "RHJ stock directory is empty");
+const aapl = findStockToken(directory, "AAPL");
+assert(aapl, "AAPL is missing from the stock directory");
+console.log(`${feeds.length} Chainlink feeds and ${directory.length} stock-directory entries verified`);
+
+/* 0.9.0 executed readers, against the live chain ------------------------- */
+const client = createPublicClient({ chain: robinhoodChain, transport: http(RPC_URL) });
+
+const state = await readScaledUiMultiplierState(client, aapl.tokenAddress);
+assert(state.uiMultiplier > 0n, "AAPL uiMultiplier() must be positive");
+assert(
+  state.schedule.status !== "due",
+  `AAPL multiplier schedule is ambiguous (due) — figures derived from it are unsafe`,
+);
+
+const pause = await readOraclePauseState(client, aapl.tokenAddress);
+assert(
+  pause === "active" || pause === "paused",
+  `AAPL oraclePaused() should answer on a stock token, got ${pause}`,
+);
+const usdgPause = await readOraclePauseState(client, USDG_ADDRESS);
+assert(
+  usdgPause === "unknown",
+  `USDG has no oraclePaused() and must fail closed to unknown, got ${usdgPause}`,
+);
+
+const usdgDecimals = await rpc(RPC_URL, "eth_call", [
+  { to: USDG_ADDRESS, data: "0x313ce567" }, // decimals()
+  "latest",
+]);
+assert(
+  BigInt(usdgDecimals) === BigInt(USDG_DECIMALS),
+  `USDG decimals() answered ${BigInt(usdgDecimals)}, expected ${USDG_DECIMALS}`,
+);
+
+const [aaplFeed] = findChainlinkFeeds(feeds, { baseAsset: "AAPL", quoteAsset: "USD" });
+assert(aaplFeed, "no AAPL/USD feed in the Chainlink directory");
+const check = await checkOracleHealth(client, { feed: aaplFeed, token: aapl.tokenAddress });
+assert(check.round.answer > 0n, "AAPL feed answer must be positive");
+assert(check.pauseState === pause, "checkOracleHealth pause state disagrees with the direct read");
+assert(
+  check.health.issues.includes("sequencer-state-unknown"),
+  "with no sequencer source the verdict must carry sequencer-state-unknown",
+);
+const share = underlyingSharePrice(check.round.answer, aaplFeed.decimals, state.schedule.multiplier);
+assert(share > 0n, "underlying share price must be positive");
+console.log(
+  `AAPL live: multiplier ${state.uiMultiplier}, pause ${pause}, ` +
+    `token price ${check.round.answer} -> share price ${share} at ${aaplFeed.decimals} decimals`,
+);
+
+const extended = client.extend(robinhoodChainActions());
+const quote = await extended.getEquityQuote("AAPL");
+assert(quote.tokenPrice.value > 0n, "equity quote must carry a positive token price");
+assert(quote.multiplier === state.uiMultiplier, "quote multiplier disagrees with the direct read");
+assert(typeof quote.session.phase === "string", "quote must carry session context");
+assert(quote.health.usable === false, "no sequencer source: the quote must not claim usable");
+console.log(
+  `viem extension verified: getEquityQuote(AAPL) -> ${quote.tokenPrice.formatted} token / ${quote.sharePrice.formatted} share (${quote.session.reason})`,
+);

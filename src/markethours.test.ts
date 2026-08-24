@@ -3,6 +3,7 @@ import {
   getUsEquityMarketSession,
   isFeedFresh,
   isUsEquityMarketOpen,
+  nextUsEquitySessionChange,
 } from "./markethours.js";
 
 /** epoch seconds for a wall-clock time in a fixed UTC offset */
@@ -85,6 +86,82 @@ describe("isUsEquityMarketOpen", () => {
       phase: "closed",
       reason: "invalid",
     });
+  });
+});
+
+describe("nextUsEquitySessionChange counts down to the schedule, not to a guess", () => {
+  it("mid-session, the next change is today's 16:00 ET close", () => {
+    // Tue 2026-01-13, 12:00 EST
+    expect(nextUsEquitySessionChange(at(2026, 1, 13, 12, 0, 5))).toEqual({
+      at: at(2026, 1, 13, 16, 0, 5),
+      to: "closed",
+    });
+  });
+
+  it("before the open, the next change is today's 09:30 ET open", () => {
+    expect(nextUsEquitySessionChange(at(2026, 7, 14, 7, 0, 4))).toEqual({
+      at: at(2026, 7, 14, 9, 30, 4),
+      to: "open",
+    });
+  });
+
+  it("after the close, the countdown skips to the next trading day", () => {
+    expect(nextUsEquitySessionChange(at(2026, 1, 13, 20, 0, 5))).toEqual({
+      at: at(2026, 1, 14, 9, 30, 5),
+      to: "open",
+    });
+  });
+
+  it("across a weekend: Friday evening counts down to Monday's open", () => {
+    // Fri 2026-01-16 20:00 EST → Mon 2026-01-19 is MLK Day → Tue 2026-01-20
+    // ... unless a Monday holiday intervenes, which is the next test. Plain
+    // weekend first: Fri 2026-01-23 → Mon 2026-01-26.
+    expect(nextUsEquitySessionChange(at(2026, 1, 23, 20, 0, 5))).toEqual({
+      at: at(2026, 1, 26, 9, 30, 5),
+      to: "open",
+    });
+    // and Saturday mid-day points to the same open
+    expect(nextUsEquitySessionChange(at(2026, 1, 24, 12, 0, 5))).toEqual({
+      at: at(2026, 1, 26, 9, 30, 5),
+      to: "open",
+    });
+  });
+
+  it("a Monday holiday pushes the weekend countdown to Tuesday", () => {
+    // Fri 2026-01-16 evening → Mon 2026-01-19 is Martin Luther King Jr. Day
+    expect(nextUsEquitySessionChange(at(2026, 1, 16, 20, 0, 5))).toEqual({
+      at: at(2026, 1, 20, 9, 30, 5),
+      to: "open",
+    });
+    // and from inside the holiday itself
+    expect(nextUsEquitySessionChange(at(2026, 1, 19, 12, 0, 5))).toEqual({
+      at: at(2026, 1, 20, 9, 30, 5),
+      to: "open",
+    });
+  });
+
+  it("an early-close day counts down to 13:00 ET, not 16:00", () => {
+    // Fri 2026-11-27, the day after Thanksgiving, 11:00 EST
+    expect(nextUsEquitySessionChange(at(2026, 11, 27, 11, 0, 5))).toEqual({
+      at: at(2026, 11, 27, 13, 0, 5),
+      to: "closed",
+    });
+    // and Thanksgiving Day itself counts down to that Friday's open
+    expect(nextUsEquitySessionChange(at(2026, 11, 26, 12, 0, 5))).toEqual({
+      at: at(2026, 11, 27, 9, 30, 5),
+      to: "open",
+    });
+  });
+
+  it("boundaries are exact epochs: the open it reports is the open it means", () => {
+    const change = nextUsEquitySessionChange(at(2026, 1, 13, 20, 0, 5));
+    expect(isUsEquityMarketOpen(change.at)).toBe(true);
+    expect(isUsEquityMarketOpen(change.at - 60)).toBe(false);
+  });
+
+  it("throws on a timestamp the calendar cannot place", () => {
+    expect(() => nextUsEquitySessionChange(Number.NaN)).toThrow(RangeError);
+    expect(() => nextUsEquitySessionChange(Date.now())).toThrow(RangeError);
   });
 });
 

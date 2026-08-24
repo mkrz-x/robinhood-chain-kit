@@ -185,7 +185,16 @@ export interface LoadChainlinkFeedDirectoryOptions {
 
 const HEX_SHA256 = /^[0-9a-f]{64}$/i;
 
-async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+/**
+ * Lowercase hex SHA-256 of raw bytes, via WebCrypto.
+ *
+ * Throws where WebCrypto is unavailable (`globalThis.crypto.subtle` is absent
+ * on very old runtimes) rather than falling back to a weaker digest. This is
+ * the digest the directory loaders compare `expectedSha256` against, exported
+ * so a caller can compute the pin for a document they have reviewed instead of
+ * copying a hash from somewhere they have not.
+ */
+export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) {
     throw new Error("expectedSha256 requires WebCrypto (globalThis.crypto.subtle)");
@@ -286,7 +295,7 @@ export interface ChainlinkRoundDataCall {
 
 /** Build viem-compatible calls for one multicall without adding a viem dependency. */
 export function getChainlinkRoundDataCalls(
-  feeds: readonly ChainlinkFeed[],
+  feeds: readonly Pick<ChainlinkFeed, "proxyAddress">[],
 ): ChainlinkRoundDataCall[] {
   return feeds.map((feed) => ({
     address: feed.proxyAddress,

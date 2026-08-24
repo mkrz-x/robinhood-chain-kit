@@ -144,6 +144,21 @@ export const ERC8056_ABI = [
     outputs: [{ name: "", type: "uint256" }],
   },
   {
+    // Corporate-action oracle pause flag, documented at
+    // https://docs.robinhood.com/chain/oracles-and-price-feeds/ ("You can read
+    // this state on-chain via oraclePaused() on the token") and verified by
+    // eth_call against a live stock token on chain 4663 on 2026-08-24: the
+    // AAPL token (0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9) answered
+    // selector 0x7706ba52 with a well-formed bool, and a plain ERC-20 (USDG)
+    // reverted — which is why readers of this member must fail closed to
+    // "unknown" rather than assume every token has it.
+    type: "function",
+    name: "oraclePaused",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
     type: "event",
     name: "TransferWithScaledUI",
     inputs: [
@@ -184,6 +199,7 @@ export const ERC8056_VERIFICATION: Readonly<Record<string, Erc8056Provenance>> =
   uiMultiplier: "deployed-call",
   newUIMultiplier: "deployed-call",
   effectiveAt: "deployed-call",
+  oraclePaused: "deployed-call",
 });
 
 export interface Erc8056ReadCall {
@@ -537,6 +553,95 @@ export interface DeliveryVersusPayment {
 }
 
 const lower = (value: string) => value.toLowerCase();
+
+/**
+ * A decoded log, as every mainstream client shapes it: the emitting contract's
+ * `address`, the `transactionHash`, and named `args`. Structural on purpose —
+ * a real viem/ethers log object carries many more fields and all of them are
+ * ignored here.
+ */
+export interface DecodedTransferLikeLog {
+  /** the token contract that emitted the log */
+  address: string;
+  transactionHash: string;
+  args: {
+    from: string;
+    to: string;
+    value: bigint;
+    /** present on TransferWithScaledUI, absent on plain ERC-20 Transfer */
+    uiValue?: bigint;
+  };
+}
+
+/** A stock leg that keeps the contract's own displayed amount alongside it. */
+export interface StockSettlementLeg extends SettlementLeg {
+  /** the contract's own displayed amount — exact, and exactly what
+   * `inferUiSettlementPrice` wants as `stockUiValue` */
+  uiValue: bigint;
+}
+
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+const legFields = (log: DecodedTransferLikeLog, kind: string): SettlementLeg => {
+  if (typeof log !== "object" || log === null || typeof log.args !== "object" || log.args === null) {
+    throw new TypeError(`${kind} log must be a decoded log with args`);
+  }
+  if (typeof log.address !== "string" || !ADDRESS.test(log.address)) {
+    throw new TypeError(`${kind} log has an invalid emitting address`);
+  }
+  if (typeof log.transactionHash !== "string" || !TX_HASH.test(log.transactionHash)) {
+    throw new TypeError(`${kind} log has an invalid transactionHash`);
+  }
+  const { from, to, value } = log.args;
+  if (typeof from !== "string" || !ADDRESS.test(from)) {
+    throw new TypeError(`${kind} log has an invalid args.from`);
+  }
+  if (typeof to !== "string" || !ADDRESS.test(to)) {
+    throw new TypeError(`${kind} log has an invalid args.to`);
+  }
+  if (typeof value !== "bigint" || value < 0n) {
+    throw new TypeError(`${kind} log args.value must be a non-negative bigint`);
+  }
+  return { transactionHash: log.transactionHash, token: log.address, from, to, value };
+};
+
+/**
+ * A decoded `TransferWithScaledUI` log to a settlement stock leg.
+ *
+ * This is the boilerplate every `pairDeliveryVersusPayment` caller was
+ * hand-writing, and hand-written versions kept making the same two mistakes:
+ * putting `uiValue` where the raw `value` belongs (a share count is not an
+ * ERC-20 amount), and dropping `uiValue` entirely, which forces the UI-price
+ * path through a multiplier estimate later. The returned leg carries the raw
+ * `value` where `SettlementLeg` requires it and keeps the exact `uiValue`
+ * beside it for `inferUiSettlementPrice`.
+ *
+ * Validation is strict and throws: a leg with a malformed address or a
+ * non-bigint amount would not fail here — it would silently fail to pair, and
+ * a settlement that vanishes is worse than one that errors.
+ */
+export function settlementLegFromScaledUiLog(log: DecodedTransferLikeLog): StockSettlementLeg {
+  const leg = legFields(log, "TransferWithScaledUI");
+  const { uiValue } = log.args;
+  if (typeof uiValue !== "bigint" || uiValue < 0n) {
+    throw new TypeError(
+      "TransferWithScaledUI log args.uiValue must be a non-negative bigint — a log without one is a plain ERC-20 Transfer; use settlementLegFromTransferLog",
+    );
+  }
+  return { ...leg, uiValue };
+}
+
+/**
+ * A decoded plain ERC-20 `Transfer` log to a settlement cash leg.
+ *
+ * Any contract can emit `Transfer`, so the log this is fed MUST already be
+ * address-filtered to a stablecoin you trust — this function validates shape,
+ * not identity. `log.address` becomes `leg.token`, which is what
+ * `pairDeliveryVersusPayment` and price inference key on.
+ */
+export function settlementLegFromTransferLog(log: DecodedTransferLikeLog): SettlementLeg {
+  return legFields(log, "Transfer");
+}
 
 /**
  * Reconstruct peer-to-peer trades that never touched a pool.

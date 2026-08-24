@@ -8,11 +8,14 @@
     "preflight:erc20": "tsx preflight-erc20-transfer.mts",
     "preflight:approval-risk": "tsx preflight-approval-risk.mts",
     "preflight:swap": "tsx preflight-custom-swap.mts",
-    "preflight:live-native": "tsx preflight-transaction.mts"
+    "preflight:live-native": "tsx preflight-transaction.mts",
+    "preflight:viem": "tsx viem-preflight.mts",
+    "oracle:health-live": "tsx oracle-health-live.mts",
+    "equity:quote": "tsx equity-quote.mts"
   },
   "dependencies": {
     "robinhood-chain-kit": "file:..",
-    "viem": "^2.21.0"
+    "viem": "^2.55.10"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

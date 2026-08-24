@@ -232,6 +232,91 @@ export function isUsEquityMarketOpen(tsSeconds: number): boolean {
   return getUsEquityMarketSession(tsSeconds).phase === "regular";
 }
 
+export interface UsEquitySessionChange {
+  /** unix epoch seconds of the next scheduled boundary */
+  at: number;
+  /** the state the session changes TO at that moment */
+  to: "open" | "closed";
+}
+
+/**
+ * Epoch seconds of a New York wall-clock time, without a timezone library.
+ * New York is UTC-4 or UTC-5; the DST switch happens at 02:00 local time,
+ * never at a session boundary, so exactly one of the two candidate offsets
+ * round-trips back to the requested wall time through the same formatter the
+ * session logic uses.
+ */
+const epochForNyMinutes = (year: number, month: number, day: number, minutes: number): number => {
+  for (const offsetHours of [4, 5]) {
+    const epoch = Date.UTC(year, month - 1, day, offsetHours, 0) / 1000 + minutes * 60;
+    const parts = nyParts.formatToParts(new Date(epoch * 1000));
+    const get = (type: Intl.DateTimeFormatPartTypes) =>
+      Number(parts.find((part) => part.type === type)?.value ?? Number.NaN);
+    if (
+      get("year") === year &&
+      get("month") === month &&
+      get("day") === day &&
+      (get("hour") % 24) * 60 + get("minute") === minutes
+    ) {
+      return epoch;
+    }
+  }
+  /* c8 ignore next */
+  throw new Error("no UTC offset reproduces the requested New York time");
+};
+
+/**
+ * The next scheduled session boundary after (or at) a timestamp: when the
+ * regular session next opens, or when the current one closes.
+ *
+ * Holiday- and early-close-aware, using the same calendar as
+ * `getUsEquityMarketSession` — so the Friday after Thanksgiving counts down to
+ * 13:00 ET, not 16:00, and the Friday evening before a Monday holiday counts
+ * down to Tuesday's open, not Monday's.
+ *
+ * The countdown is to the SCHEDULE. It cannot predict emergency closures, and
+ * it says nothing about oracle freshness: Stock Token feeds publish 24/5, so
+ * "market closed" does not mean "feed should be stale" — keep using
+ * `isFeedFresh` for that. Throws `RangeError` on a timestamp the calendar
+ * cannot place, rather than returning a boundary that looks real.
+ */
+export function nextUsEquitySessionChange(tsSeconds: number): UsEquitySessionChange {
+  const session = getUsEquityMarketSession(tsSeconds);
+  if (session.reason === "invalid" || session.localDate === undefined) {
+    throw new RangeError("tsSeconds must be a plausible epoch timestamp in seconds");
+  }
+  const [year, month, day] = session.localDate.split("-").map(Number) as [number, number, number];
+
+  if (session.phase === "regular") {
+    return { at: epochForNyMinutes(year, month, day, session.closeMinutes!), to: "closed" };
+  }
+  if (session.reason === "before-open") {
+    return { at: epochForNyMinutes(year, month, day, OPEN_MINUTES), to: "open" };
+  }
+  // after-close, weekend, or holiday: the next boundary is the next trading
+  // day's open. The longest scheduled gap is a long weekend plus observed
+  // holidays, so a bounded two-week scan is a proof of termination, not a
+  // guess.
+  let date = utcDate(year, month, day);
+  for (let i = 0; i < 14; i++) {
+    date = addUtcDays(date, 1);
+    const weekday = date.getUTCDay();
+    if (weekday === 0 || weekday === 6) continue;
+    if (calendarFor(date.getUTCFullYear()).holidays.has(keyFromUtcDate(date))) continue;
+    return {
+      at: epochForNyMinutes(
+        date.getUTCFullYear(),
+        date.getUTCMonth() + 1,
+        date.getUTCDate(),
+        OPEN_MINUTES,
+      ),
+      to: "open",
+    };
+  }
+  /* c8 ignore next */
+  throw new Error("no trading day found within 14 days — the calendar is corrupt");
+}
+
 export type FeedFreshnessReason = "fresh" | "stale" | "future" | "invalid";
 
 export interface FeedFreshness {

@@ -23,6 +23,81 @@
 
 ---
 
+```ts
+// npm i robinhood-chain-kit viem
+import { createPublicClient, http } from 'viem'
+import { robinhoodChain } from 'robinhood-chain-kit'
+import { robinhoodChainActions } from 'robinhood-chain-kit/viem'
+const client = createPublicClient({ chain: robinhoodChain, transport: http() }).extend(robinhoodChainActions())
+console.log(await client.getEquityQuote('AAPL'))
+```
+
+That one call resolves the ticker through Robinhood's own token registry,
+matches the Chainlink feed, reads the round, the authoritative ERC-8056
+multiplier, and the corporate-action pause flag from the contracts, and returns
+token price, underlying share price, session context, and a fail-closed health
+verdict. viem is an **optional** peer used by the `/viem` entry alone — and
+only for types, so the core package still has **zero runtime dependencies**
+and works with any client that can execute a read call.
+
+## What touches the network
+
+Everything in this package is pure computation except the functions below.
+Nothing here ever signs, sends, or holds a key.
+
+| Function | Talks to | Via |
+|---|---|---|
+| `getEquityQuote` / `getOracleHealth` / `getScaledUiMultiplierState` / `getStockDirectory` (viem actions) | chain 4663 + both directories | your client + `fetch` |
+| `readScaledUiMultiplierState(s)`, `readOraclePauseState` | stock-token contracts | your client |
+| `readOracleRound(s)`, `readSequencerUptime`, `checkOracleHealth` | Chainlink feeds (+ token) | your client |
+| `executeContractCalls` | whatever calls you give it | your client |
+| `loadStockTokenDirectory` | `api.robinhood.com/rhj/assets` | `fetch` (injectable) |
+| `loadChainlinkFeedDirectory` | the Chainlink reference directory | `fetch` (injectable) |
+| `inspectTransaction` | read-only evidence | the adapter **you** supply |
+| `getLogsPaged` | your RPC | the `getLogs` **you** supply |
+| `fetchWithRetry` | the URL you pass | `fetch` (injectable) |
+
+Everything else — decoding, multiplier math, settlement pairing, premium and
+deviation arithmetic, session calendars, health assessment — is `[pure]` and
+runs the same offline. `llms.txt` in the package root lists every export with
+its `[pure]`/`[network]` marker, one line each, for token-budgeted contexts.
+
+## Oracle health in three lines
+
+`assessOracleHealth` has always failed closed on unknown sequencer and pause
+state — and 0.8.x gave you no way to *obtain* either input. Now the doors have
+on-ramps:
+
+```ts
+const [feed] = findChainlinkFeeds(await loadChainlinkFeedDirectory(), { baseAsset: "AAPL", quoteAsset: "USD" });
+const token = findStockToken(await loadStockTokenDirectory(), "AAPL");
+const { health } = await checkOracleHealth(client, { feed: feed!, token: token!.tokenAddress });
+```
+
+One call reads the round, the token's on-chain `oraclePaused()` flag
+(documented on the official oracles page and verified against live contracts),
+and — when you pass one — an L2 sequencer uptime feed. The verdict is the same
+fail-closed assessment: on a healthy feed with no sequencer source you get
+`usable: false, issues: ["sequencer-state-unknown"]`, which is the honest
+statement of what you have not verified. No uptime feed address for chain 4663
+is listed in the live Chainlink directory, so the kit ships none — supply
+`sequencerFeed` when Chainlink publishes one, or `sequencer` from your own
+liveness monitoring.
+
+## The multiplier in one
+
+```ts
+const { schedule } = await readScaledUiMultiplierState(client, stockToken);
+// schedule.multiplier is the contract's own uiMultiplier();
+// schedule.status says whether a figure computed from it is safe right now
+```
+
+`readScaledUiMultiplierStates(client, tokens)` batches the whole directory
+through Multicall3 (falling back to sequential reads on clients without it),
+isolating per-token failures. The `client` in all of these is structural — any
+viem `PublicClient` satisfies it, and so does anything else with a
+`readContract` — because the kit still imports no client library.
+
 ## Why
 
 Every project on this chain re-derives the same primitives: network and bridge
@@ -51,7 +126,11 @@ disagree, this package follows the deployment and says which is which.
 | `dex` | **V2/V3/V4** event signatures, explicit caller/recipient roles, and address-scoped factory/PoolManager discovery targets |
 | `stocktokens` / ERC-8056 | the transfer event stock tokens **actually** emit and its verified `topic0`, client-neutral ABI with per-member provenance, **bounded** multiplier estimation with exact feasible intervals, raw↔display conversion, corporate-action detection that will not fire on estimate noise, and peer-to-peer settlement reconstruction priced per raw **or** per displayed unit |
 | `feeds` / Oracle Guard | strict Chainlink directory loading, typed feed lookup and read calls, exact bigint price formatting, and fail-closed round/sequencer/pause assessment |
+| `registry` | Robinhood's own stock-token address book (`api.robinhood.com/rhj/assets`), parsed atomically with optional byte pinning, plus the **verified USDG** cash-asset constants |
+| executed readers | `readScaledUiMultiplierState(s)`, `readOraclePauseState`, `readOracleRound(s)`, `readSequencerUptime`, `checkOracleHealth` — the on-ramps that turn exported call descriptors into typed live state, over any structural client |
+| `premium` | `underlyingSharePrice` (the feed prices the **token**, not the share — the docs' 1e18 formula, encoded), signed `premiumBps`, exact deviation math without the preflight engine |
 | `preflight` / Transaction Firewall | strict action decoding, injected simulation and identity evidence, exact balance/fee/market checks, and withheld-or-ready transaction plans |
+| `robinhood-chain-kit/viem` | `robinhoodChainActions()` for `.extend()` and `createViemPreflightAdapter` — the shipped viem bindings; viem stays an optional, types-only peer |
 | `getLogsPaged(getLogs, from, to, opts)` | exact-block-count log backfill: shrinks only on recognized size errors, bounds 429 retries, supports cancellation, and never retries consumer callbacks |
 | `getUsEquityMarketSession(ts)` | DST-, holiday-, and early-close-aware US regular-session context |
 | `isFeedFresh(updatedAt, heartbeat, now)` | heartbeat freshness independent from the regular session; Stock Token feeds currently publish 24/5 |
@@ -69,7 +148,12 @@ disagree, this package follows the deployment and says which is which.
 npm i robinhood-chain-kit
 ```
 
-Node 20.3+ is supported. Both ESM imports and CommonJS `require()` are published.
+Node 20.3+ is supported. Both ESM imports and CommonJS `require()` are
+published, from the root and from four subpaths — `./viem`, `./erc8056`,
+`./oracle`, `./preflight` — so a bundle that only guards prices does not carry
+the preflight engine. The root re-exports everything except the viem entry.
+viem is an optional peer: install it for the `/viem` bindings, skip it and
+everything else works unchanged.
 
 ## Usage
 
@@ -110,6 +194,11 @@ function shouldCompareDuringRegularSession(updatedAt: number, heartbeat: number)
 Robinhood Stock Token feeds are documented as 24/5, so do not use the regular
 session as a feed-freshness proxy: check `updatedAt`, the feed heartbeat,
 sequencer uptime, and the token's corporate-action pause state.
+
+`nextUsEquitySessionChange(ts)` returns the exact epoch of the next scheduled
+boundary and which way it flips — `{ at, to: "open" | "closed" }` — holiday-
+and early-close-aware, so the Friday after Thanksgiving counts down to 13:00
+ET and a Friday evening before a Monday holiday counts down to Tuesday's open.
 
 ### Backfill event history without babysitting the RPC
 
@@ -288,7 +377,15 @@ import {
   inferRawSettlementPrice,
   inferUiSettlementPrice,
   pairDeliveryVersusPayment,
+  settlementLegFromScaledUiLog,
+  settlementLegFromTransferLog,
 } from "robinhood-chain-kit";
+
+// decoded logs -> legs, with the two hand-written mistakes designed out:
+// the raw value lands where SettlementLeg requires it, and the contract's
+// exact uiValue rides along for UI pricing instead of being dropped
+const stockLegs = stockLogs.map(settlementLegFromScaledUiLog);
+const cashLegs = usdgLogs.map(settlementLegFromTransferLog); // address-filter these first
 
 const settlements = pairDeliveryVersusPayment({ stockLegs, cashLegs });
 const scales = { stockDecimals: 18, cashDecimals: 6, priceDecimals: 2 };
@@ -375,6 +472,11 @@ Use `"not-applicable"` only for assets that do not have corporate-action
 pauses. Oracle Guard reports safety inputs; it never emits buy/sell decisions
 or invents fallback prices.
 
+When you want the inputs gathered for you — the round executed, the pause flag
+read from the token, the uptime feed consulted — that is
+[`checkOracleHealth`](#oracle-health-in-three-lines), which feeds this same
+assessment.
+
 ### Preflight a transaction before signing
 
 Transaction Firewall separates a transaction's claimed calldata shape from
@@ -429,6 +531,12 @@ if (report.verdict !== "safe") console.error(report.issues);
 else console.log(report.plan.steps); // prepared only; never signed or sent
 ```
 
+With viem, the adapter above is one call —
+`createViemPreflightAdapter(publicClient)` from `robinhood-chain-kit/viem` —
+which implements every method viem makes trivial and deliberately omits
+`resolveContract`/`resolveAsset` rather than fabricating `verified: true`
+evidence from an RPC that cannot know it.
+
 The default policy allows only Robinhood mainnet/testnet, requires RPC chain
 identity, simulation, gas, fee and balance evidence, blocks unlimited token and
 operator approvals, blocks EOA or unknown/unverified approval targets, and
@@ -456,6 +564,9 @@ Runnable scripts in [`examples/`](examples/):
 
 - [`watch-bridge.mts`](examples/watch-bridge.mts) — recent canonical ERC-20 deposits, with each token's actual decimals
 - [`scan-pools.mts`](examples/scan-pools.mts) — V2/V3/V4 discovery from verified deployment addresses, with streaming and resume bounds
+- [`equity-quote.mts`](examples/equity-quote.mts) — the five-line viem on-ramp: one composed live quote with the honest remaining unknown printed
+- [`oracle-health-live.mts`](examples/oracle-health-live.mts) — `checkOracleHealth` against mainnet, and why no sequencer feed address ships
+- [`viem-preflight.mts`](examples/viem-preflight.mts) — the whole preflight adapter in one `createViemPreflightAdapter` call
 - [`market-session.mts`](examples/market-session.mts) — report regular-session context without claiming oracle freshness
 - [`stock-token-transfers.mts`](examples/stock-token-transfers.mts) — bound a stock token's ERC-8056 multiplier from live logs, prove a corporate action from disjoint ranges, and list the authoritative contract reads
 - [`oracle-guard.mts`](examples/oracle-guard.mts) — read a live feed and fail closed on unknown sequencer or pause state

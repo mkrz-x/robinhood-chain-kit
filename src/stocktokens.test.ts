@@ -21,6 +21,8 @@ import {
   pairDeliveryVersusPayment,
   readScaledUiMultiplier,
   resolveScaledUiMultiplier,
+  settlementLegFromScaledUiLog,
+  settlementLegFromTransferLog,
   toRawAmount,
   toUiAmount,
   type SettlementLeg,
@@ -542,5 +544,80 @@ describe("resolveScaledUiMultiplier — a schedule is not a state", () => {
     expect(() => at(-1n, ONE, 0, 0)).toThrow(RangeError);
     expect(() => at(ONE, ONE, -1, 0)).toThrow(RangeError);
     expect(() => at(ONE, ONE, 0, Number.NaN)).toThrow(RangeError);
+  });
+});
+
+describe("settlement legs from decoded logs", () => {
+  const TX = `0x${"ab".repeat(32)}`;
+  const scaledUiLog = {
+    address: TSLA,
+    transactionHash: TX,
+    args: { from: ALICE, to: BOB, value: 3_000_000_000_000_000_000n, uiValue: 4_500_000_000_000_000_000n },
+    // fields a real client attaches and this module ignores
+    blockNumber: 123n,
+    logIndex: 7,
+  };
+  const transferLog = {
+    address: USDG,
+    transactionHash: TX,
+    args: { from: BOB, to: ALICE, value: 400_000_000n },
+  };
+
+  it("builds a stock leg that keeps raw value AND the contract's uiValue", () => {
+    const stockLeg = settlementLegFromScaledUiLog(scaledUiLog);
+    expect(stockLeg).toEqual({
+      transactionHash: TX,
+      token: TSLA,
+      from: ALICE,
+      to: BOB,
+      value: 3_000_000_000_000_000_000n,
+      uiValue: 4_500_000_000_000_000_000n,
+    });
+  });
+
+  it("builds a cash leg from a plain Transfer, keyed by the emitting contract", () => {
+    expect(settlementLegFromTransferLog(transferLog)).toEqual({
+      transactionHash: TX,
+      token: USDG,
+      from: BOB,
+      to: ALICE,
+      value: 400_000_000n,
+    });
+  });
+
+  it("the two legs pair straight into pairDeliveryVersusPayment", () => {
+    const settlements = pairDeliveryVersusPayment({
+      stockLegs: [settlementLegFromScaledUiLog(scaledUiLog)],
+      cashLegs: [settlementLegFromTransferLog(transferLog)],
+    });
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]).toMatchObject({ buyer: BOB, seller: ALICE });
+    // and the kept uiValue is exactly what UI pricing wants
+    const priced = inferUiSettlementPrice({
+      settlement: settlements[0]!,
+      stockDecimals: 18,
+      cashDecimals: 6,
+      priceDecimals: 2,
+      stockUiValue: settlementLegFromScaledUiLog(scaledUiLog).uiValue,
+    });
+    expect(priced).toMatchObject({ inferred: true, price: "88.88", stockAmountMode: "ui" });
+  });
+
+  it("a scaled-UI log without uiValue is redirected, loudly, to the Transfer builder", () => {
+    expect(() =>
+      settlementLegFromScaledUiLog({ ...scaledUiLog, args: { from: ALICE, to: BOB, value: 1n } }),
+    ).toThrow(/settlementLegFromTransferLog/);
+  });
+
+  it.each([
+    ["a malformed emitting address", { ...transferLog, address: "0xnope" }],
+    ["a malformed transaction hash", { ...transferLog, transactionHash: "0x1234" }],
+    ["a malformed from", { ...transferLog, args: { ...transferLog.args, from: "bob" } }],
+    ["a malformed to", { ...transferLog, args: { ...transferLog.args, to: "0x12" } }],
+    ["a numeric value", { ...transferLog, args: { ...transferLog.args, value: 400 } }],
+    ["a negative value", { ...transferLog, args: { ...transferLog.args, value: -1n } }],
+    ["missing args", { address: USDG, transactionHash: TX }],
+  ])("throws on %s instead of building a leg that silently fails to pair", (_label, log) => {
+    expect(() => settlementLegFromTransferLog(log as never)).toThrow(TypeError);
   });
 });

@@ -32,21 +32,44 @@ try {
     consumer,
   );
 
-  const assertion =
+  const rootAssertion =
     "if (m.CHAIN_ID !== 4663 || typeof m.assessOracleHealth !== 'function' " +
-    "|| typeof m.inspectTransaction !== 'function') " +
-    "throw new Error('packed exports are incomplete')";
-  run(
-    process.execPath,
-    ["--input-type=module", "--eval", `const m=await import('robinhood-chain-kit');${assertion}`],
-    consumer,
-  );
-  run(
-    process.execPath,
-    ["--input-type=commonjs", "--eval", `const m=require('robinhood-chain-kit');${assertion}`],
-    consumer,
-  );
-  console.log("Packed ESM import and CommonJS require smoke tests passed");
+    "|| typeof m.inspectTransaction !== 'function' " +
+    "|| typeof m.readScaledUiMultiplierState !== 'function' " +
+    "|| typeof m.loadStockTokenDirectory !== 'function') " +
+    "throw new Error('packed root exports are incomplete')";
+  // Subpath entries under both module systems. The viem entry matters most:
+  // its runtime must load WITHOUT viem installed, because viem is an optional
+  // peer and this consumer deliberately does not have it.
+  const subpathAssertions = [
+    ["robinhood-chain-kit/viem", "typeof m.robinhoodChainActions === 'function' && typeof m.createViemPreflightAdapter === 'function'"],
+    ["robinhood-chain-kit/oracle", "typeof m.checkOracleHealth === 'function' && typeof m.computePriceDeviationBps === 'function'"],
+    ["robinhood-chain-kit/erc8056", "typeof m.readScaledUiMultiplierState === 'function' && typeof m.findStockToken === 'function'"],
+    ["robinhood-chain-kit/preflight", "typeof m.inspectTransaction === 'function'"],
+  ];
+  const scripts = [
+    ["--input-type=module", (spec) => `const m=await import('${spec}');`],
+    ["--input-type=commonjs", (spec) => `const m=require('${spec}');`],
+  ];
+  for (const [inputType, load] of scripts) {
+    run(
+      process.execPath,
+      [inputType, "--eval", `${load("robinhood-chain-kit")}${rootAssertion}`],
+      consumer,
+    );
+    for (const [spec, condition] of subpathAssertions) {
+      run(
+        process.execPath,
+        [
+          inputType,
+          "--eval",
+          `${load(spec)}if (!(${condition})) throw new Error('packed ${spec} exports are incomplete')`,
+        ],
+        consumer,
+      );
+    }
+  }
+  console.log("Packed ESM import and CommonJS require smoke tests passed (root + 4 subpaths)");
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }

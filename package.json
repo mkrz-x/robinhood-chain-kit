@@ -1,6 +1,6 @@
 {
   "name": "robinhood-chain-kit",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "ERC-8056 scaled-UI stock tokens, peer-to-peer settlement, transaction preflight, Oracle Guard, chain constants, and resilient RPC helpers for Robinhood Chain (chain id 4663).",
   "license": "MIT",
   "type": "module",
@@ -8,10 +8,11 @@
   "module": "./dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "llms.txt"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --sourcemap --clean",
+    "build": "tsup src/index.ts src/viem.ts src/entry-erc8056.ts src/entry-oracle.ts src/entry-preflight.ts --format esm,cjs --dts --sourcemap --clean",
     "check:types": "tsc -p tsconfig.json --noEmit",
     "check:package": "publint && attw --pack . && npm run check:packed",
     "check:packed": "node scripts/check-packed.mjs",
@@ -21,6 +22,14 @@
     "verify": "npm run check:types && npm run build && npm test && npm run check:package && npm run check:examples",
     "release": "node scripts/preflight-release.mjs && npm run verify && npm publish",
     "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "viem": "^2.21.0"
+  },
+  "peerDependenciesMeta": {
+    "viem": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
@@ -68,7 +77,13 @@
     "corporate-actions",
     "stock-tokens",
     "settlement",
-    "delivery-versus-payment"
+    "delivery-versus-payment",
+    "viem-extension",
+    "usdg",
+    "oracle",
+    "uniswap-v4",
+    "mcp",
+    "agentic"
   ],
   "sideEffects": false,
   "exports": {
@@ -82,6 +97,50 @@
         "default": "./dist/index.cjs"
       },
       "default": "./dist/index.js"
+    },
+    "./viem": {
+      "import": {
+        "types": "./dist/viem.d.ts",
+        "default": "./dist/viem.js"
+      },
+      "require": {
+        "types": "./dist/viem.d.cts",
+        "default": "./dist/viem.cjs"
+      },
+      "default": "./dist/viem.js"
+    },
+    "./erc8056": {
+      "import": {
+        "types": "./dist/entry-erc8056.d.ts",
+        "default": "./dist/entry-erc8056.js"
+      },
+      "require": {
+        "types": "./dist/entry-erc8056.d.cts",
+        "default": "./dist/entry-erc8056.cjs"
+      },
+      "default": "./dist/entry-erc8056.js"
+    },
+    "./oracle": {
+      "import": {
+        "types": "./dist/entry-oracle.d.ts",
+        "default": "./dist/entry-oracle.js"
+      },
+      "require": {
+        "types": "./dist/entry-oracle.d.cts",
+        "default": "./dist/entry-oracle.cjs"
+      },
+      "default": "./dist/entry-oracle.js"
+    },
+    "./preflight": {
+      "import": {
+        "types": "./dist/entry-preflight.d.ts",
+        "default": "./dist/entry-preflight.js"
+      },
+      "require": {
+        "types": "./dist/entry-preflight.d.cts",
+        "default": "./dist/entry-preflight.cjs"
+      },
+      "default": "./dist/entry-preflight.js"
     }
   }
 }
