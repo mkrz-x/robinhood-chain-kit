@@ -37,7 +37,7 @@
     "tsup": "^8.5.0",
     "typescript": "^5.5.0",
     "viem": "^2.55.10",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.11"
   },
   "repository": {
     "type": "git",
