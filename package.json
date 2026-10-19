@@ -34,7 +34,7 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
     "publint": "^0.3.22",
-    "tsup": "^8.5.0",
+    "tsup": "^9.0.0",
     "typescript": "^5.5.0",
     "viem": "^2.55.10",
     "vitest": "^3.0.0"
